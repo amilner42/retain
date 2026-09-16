@@ -30,15 +30,16 @@ defmodule Retain.LadderTest do
     assert Ladder.outcome?(:pass)
     assert Ladder.outcome?(:partial)
     assert Ladder.outcome?(:fail)
+    assert Ladder.outcome?(:known)
     refute Ladder.outcome?(:correct)
     refute Ladder.outcome?("pass")
   end
 
-  property "step always lands on a real level" do
+  property "step always lands on a real level, and moves at most one except for :known" do
     check all level <- integer(0..6), outcome <- member_of(Ladder.outcomes()) do
       next = Ladder.step(@ladder, level, outcome)
       assert next in 0..6
-      assert abs(next - level) <= 1
+      if outcome == :known, do: assert(next == 6), else: assert(abs(next - level) <= 1)
     end
   end
 

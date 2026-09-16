@@ -150,11 +150,64 @@ defmodule RetainTest do
     end
   end
 
+  describe "master/3" do
+    setup do
+      user!()
+      items!("u1", ["a", "b"])
+      items!("u1", ["fresh"], status: :new)
+      review!("u1", "a", :pass, at: t0())
+      :ok
+    end
+
+    test "jumps items to the top level via a :known review, starting new ones" do
+      assert {:ok, %{mastered: 3}} = Retain.master("u1", ["a", "b", "fresh", "zzz"], now: days(1))
+
+      for key <- ["a", "b", "fresh"] do
+        assert %Item{level: 6, due: due, started_at: started} = item!("u1", key)
+        assert due == days(121)
+        assert started != nil
+      end
+
+      assert item!("u1", "a").reps == 2
+      assert Repo.aggregate(from(r in Retain.Review, where: r.outcome == :known), :count) == 3
+      assert {:ok, %{days_active: 2}} = Retain.streak("u1", now: days(1))
+    end
+
+    test "survives rebuild and shows in history" do
+      {:ok, _} = Retain.master("u1", "b", now: days(1))
+      Repo.update_all(Item, set: [level: 0])
+      {:ok, _} = Retain.rebuild("u1")
+      assert item!("u1", "b").level == 6
+
+      day = Retain.Clock.local_date(days(1), tz())
+      assert {:ok, [%{acquired: acquired}]} = Retain.history("u1", from: day, to: day)
+      # a at level 1, b at 6, fresh at 0 -> 7 / 18
+      assert_in_delta acquired, 7 / 18, 1.0e-9
+    end
+
+    test "skips suspended items, is atomic on out-of-order" do
+      {:ok, _} = Retain.suspend("u1", "b")
+      assert {:ok, %{mastered: 1}} = Retain.master("u1", ["a", "b"], now: days(1))
+      assert item!("u1", "b").level == 0
+
+      assert {:error, :out_of_order} =
+               Retain.master("u1", ["fresh", "a"], now: DateTime.add(t0(), -1, :day))
+
+      assert item!("u1", "fresh").level == 0
+      assert {:error, :not_found} = Retain.master("nobody", "a")
+    end
+  end
+
   describe "review/4" do
     setup do
       user!()
       items!("u1", ["a"])
       :ok
+    end
+
+    test ":known is a valid outcome" do
+      assert {:ok, %{level_before: 0, level_after: 6}} =
+               Retain.review("u1", "a", :known, at: t0())
     end
 
     test "climbs, holds and drops the ladder, setting due from the new level" do

@@ -13,7 +13,7 @@ defmodule Retain.Review do
   schema "retain_reviews" do
     belongs_to :item, Retain.Item
 
-    field :outcome, Ecto.Enum, values: [:pass, :partial, :fail]
+    field :outcome, Ecto.Enum, values: [:pass, :partial, :fail, :known]
     field :at, :utc_datetime_usec
     field :meta, :map, default: %{}
 

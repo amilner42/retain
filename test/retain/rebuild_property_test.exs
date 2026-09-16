@@ -50,7 +50,7 @@ defmodule Retain.RebuildPropertyTest do
   # {item index, outcome, hours after t0}
   defp log_generator(n_items) do
     entry =
-      {integer(0..(n_items - 1)), member_of([:pass, :partial, :fail]), integer(0..(30 * 24))}
+      {integer(0..(n_items - 1)), member_of(Retain.Ladder.outcomes()), integer(0..(30 * 24))}
 
     list_of(entry, max_length: 40)
   end

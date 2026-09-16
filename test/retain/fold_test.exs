@@ -53,6 +53,20 @@ defmodule Retain.FoldTest do
     assert s.lapses == 1
   end
 
+  test ":known jumps to the top and is due at the top interval; a later fail drops one" do
+    s = Fold.apply(Fold.initial(@t0), @ladder, :known, @t0)
+
+    assert s == %{
+             level: 6,
+             due: DateTime.add(@t0, 120, :day),
+             reps: 1,
+             lapses: 0,
+             last_reviewed_at: @t0
+           }
+
+    assert %{level: 5, lapses: 1} = Fold.apply(s, @ladder, :fail, s.due)
+  end
+
   test "replay is the same as applying one by one" do
     reviews = [
       {:pass, @t0},

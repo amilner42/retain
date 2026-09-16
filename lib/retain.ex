@@ -46,8 +46,9 @@ defmodule Retain do
       rotation, *suspended* while paused. `put_items/3` adds items as new by default, so a host
       can load a whole map up front; `queue/2` introduces them a few per day, or `start/3` does
       it explicitly. Reviewing a new item starts it.
-    * **Review** — one attempt, with an outcome of `:pass`, `:partial` or `:fail`. Reviews are
-      never updated or deleted; every other number Retain reports is derived from them.
+    * **Review** — one attempt, with an outcome of `:pass`, `:partial` or `:fail`, or `:known`
+      for "I already know this" (see `master/3`). Reviews are never updated or deleted; every
+      other number Retain reports is derived from them.
     * **Ladder** — level 0..6 per item; `:pass` climbs, `:partial` holds, `:fail` drops. Each
       level has an interval; see `Retain.Ladder`.
     * **User** — whoever your app says. `uid` is any string; `tz` is required because "today"
@@ -299,6 +300,33 @@ defmodule Retain do
   end
 
   @doc """
+  Marks items as already known: each jumps to the top level and is due at its interval, like
+  any other item there. Recorded in the log as a `:known` review, so it survives `rebuild/2`
+  and shows in `history/2`. Takes a key or a list of keys; unknown and suspended keys are
+  ignored; new items are started.
+
+      Retain.master("u1", ["être/present/je", "être/present/tu"])
+      #=> {:ok, %{mastered: 2}}
+  """
+  @spec master(uid(), key() | [key()], keyword()) ::
+          {:ok, %{mastered: non_neg_integer()}} | {:error, :not_found | :out_of_order}
+  def master(uid, keys, opts \\ []) when is_binary(uid) do
+    with {:ok, user} <- fetch_user(uid, opts) do
+      at = now(opts)
+
+      repo().transaction(fn ->
+        Enum.reduce(List.wrap(keys), %{mastered: 0}, fn key, acc ->
+          case do_review(user, key, :known, at, %{}) do
+            {:ok, _} -> %{acc | mastered: acc.mastered + 1}
+            {:error, reason} when reason in [:not_found, :suspended] -> acc
+            {:error, reason} -> repo().rollback(reason)
+          end
+        end)
+      end)
+    end
+  end
+
+  @doc """
   Pauses items: they leave `queue/2` and `due/2` and cannot be reviewed until resumed. Takes a
   key or a list of keys; unknown keys are ignored.
 
@@ -324,7 +352,7 @@ defmodule Retain do
   Records an attempt and moves the item on the ladder. This is the only write that changes
   ladder state, and it is the only way to. Reviewing a new item starts it.
 
-  `outcome` is `:pass`, `:partial` or `:fail`. Options:
+  `outcome` is `:pass`, `:partial`, `:fail`, or `:known` to jump to the top level. Options:
 
     * `at:` — when it happened; defaults to now. Must not be earlier than the item's creation,
       start or previous review, so the log stays in order (`{:error, :out_of_order}`).
@@ -345,14 +373,33 @@ defmodule Retain do
     with :ok <- if(Ladder.outcome?(outcome), do: :ok, else: {:error, :invalid_outcome}),
          {:ok, user} <- fetch_user(uid, opts) do
       repo().transaction(fn ->
-        item =
-          repo().one(
-            from i in Item, where: i.user_id == ^user.id and i.key == ^key, lock: "FOR UPDATE"
-          ) || repo().rollback(:not_found)
+        case do_review(user, key, outcome, at, meta) do
+          {:ok, result} -> result
+          {:error, reason} -> repo().rollback(reason)
+        end
+      end)
+    end
+  end
 
-        if item.suspended, do: repo().rollback(:suspended)
-        unless in_order?(item, at), do: repo().rollback(:out_of_order)
+  # The body of review/4, to run inside a transaction. Writes nothing unless it succeeds, so a
+  # caller batching several (master/3) can skip failures without poisoning its transaction.
+  defp do_review(user, key, outcome, at, meta) do
+    item =
+      repo().one(
+        from i in Item, where: i.user_id == ^user.id and i.key == ^key, lock: "FOR UPDATE"
+      )
 
+    cond do
+      is_nil(item) ->
+        {:error, :not_found}
+
+      item.suspended ->
+        {:error, :suspended}
+
+      not in_order?(item, at) ->
+        {:error, :out_of_order}
+
+      true ->
         state = Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at])
         next = Fold.apply(state, ladder(), outcome, at)
         changes = if item.started_at, do: next, else: Map.put(next, :started_at, at)
@@ -360,8 +407,8 @@ defmodule Retain do
         repo().update!(Ecto.Changeset.change(item, changes))
         review = repo().insert!(%Review{item_id: item.id, outcome: outcome, at: at, meta: meta})
 
-        %{level_before: item.level, level_after: next.level, due: next.due, review_id: review.id}
-      end)
+        {:ok,
+         %{level_before: item.level, level_after: next.level, due: next.due, review_id: review.id}}
     end
   end
 

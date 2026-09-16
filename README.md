@@ -53,6 +53,10 @@ Retain.put_items("u1", [%{key: "pos:8f2a/cube", tags: %{kind: "cube"}, content: 
 Retain.start("u1", 5, tags: %{tense: "present"})
 Retain.start("u1", ["aller/present/il"])
 
+# "I know this already" and "I don't want to see this".
+Retain.master("u1", ["être/present/je", "être/present/tu"])   #=> {:ok, %{mastered: 2}}
+Retain.suspend("u1", "aller/present/vous")                    #=> {:ok, %{suspended: 1}}
+
 # How they're doing.
 Retain.summary("u1", group_by: [:verb])
 #=> {:ok, [%{group: %{"verb" => "aller"}, count: 24, new_count: 12, active_count: 12,
@@ -74,7 +78,7 @@ Every function returns `{:ok, _}` or `{:error, reason}`. Unknown users and items
 ## How it works
 
 **The ladder.** Every item has a level from 0 to 6. `:pass` climbs one, `:partial` holds,
-`:fail` drops one. Each level has an interval — `0, 1, 3, 7, 21, 60, 120` days by default — and
+`:fail` drops one, `:known` jumps to the top. Each level has an interval — `0, 1, 3, 7, 21, 60, 120` days by default — and
 an item is due that many days after its last review. New items are level 0 and due immediately.
 Level 6 still comes back every 120 days so it can be lost again.
 
