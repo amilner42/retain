@@ -153,6 +153,16 @@ defmodule Retain do
                 )
 
                 repo().delete!(item)
+
+                # The merged log may start before the target item did; an item must predate
+                # its reviews or history would ignore the early ones.
+                repo().update_all(
+                  from(i in Item,
+                    where: i.id == ^target_id and i.inserted_at > ^item.inserted_at
+                  ),
+                  set: [inserted_at: item.inserted_at]
+                )
+
                 rederive_item!(target_id, ladder)
                 {moved, merged + 1}
             end
@@ -458,8 +468,13 @@ defmodule Retain do
   defp scope(opts), do: Keyword.get(opts, :scope, Config.default_scope())
   defp now(opts), do: usec(Keyword.get(opts, :now) || DateTime.utc_now())
 
-  # Columns are microsecond precision; accept any precision from callers.
-  defp usec(%DateTime{microsecond: {us, _}} = dt), do: %{dt | microsecond: {us, 6}}
+  # Columns are UTC at microsecond precision; accept any zone and precision from callers.
+  defp usec(%DateTime{} = dt) do
+    %DateTime{microsecond: {us, _}} =
+      dt = DateTime.shift_zone!(dt, "Etc/UTC", Tz.TimeZoneDatabase)
+
+    %{dt | microsecond: {us, 6}}
+  end
 
   defp put_if(map, _key, nil), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)

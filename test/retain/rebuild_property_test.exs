@@ -12,10 +12,7 @@ defmodule Retain.RebuildPropertyTest do
 
   property "for any review log, rebuild == live and history == live" do
     check all n_items <- integer(1..5),
-              log <-
-                list_of(
-                  {integer(0..(n_items - 1)), member_of([:pass, :partial, :fail]),
-                   integer(0..(30 * 24))}, max_length: 40),
+              log <- log_generator(n_items),
               max_runs: 30 do
       uid = "p#{System.unique_integer([:positive])}"
       user!(uid)
@@ -48,6 +45,14 @@ defmodule Retain.RebuildPropertyTest do
       assert_in_delta point.explored, explored, 1.0e-9
       assert_in_delta point.acquired, mean / 6, 1.0e-9
     end
+  end
+
+  # {item index, outcome, hours after t0}
+  defp log_generator(n_items) do
+    entry =
+      {integer(0..(n_items - 1)), member_of([:pass, :partial, :fail]), integer(0..(30 * 24))}
+
+    list_of(entry, max_length: 40)
   end
 
   defp snapshot(uid) do

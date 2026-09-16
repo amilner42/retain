@@ -177,6 +177,15 @@ defmodule RetainTest do
       assert {:ok, _} = Retain.review("u1", "a", :pass, at: days(2))
     end
 
+    test "accepts timestamps in any zone and precision" do
+      local = DateTime.shift_zone!(days(1), "Asia/Tokyo", Tz.TimeZoneDatabase)
+      assert {:ok, %{due: due}} = Retain.review("u1", "a", :pass, at: local)
+      assert due == days(2)
+      assert %Item{last_reviewed_at: last} = item!("u1", "a")
+      assert last == days(1)
+      assert last.time_zone == "Etc/UTC"
+    end
+
     test "defaults `at` to now" do
       before = DateTime.utc_now()
       {:ok, _} = Retain.review("u1", "a", :pass)
@@ -443,10 +452,11 @@ defmodule RetainTest do
     setup do
       user!("guest")
       user!("acct")
-      items!("guest", [%{key: "only_guest", tags: %{k: "g"}}, %{key: "both"}])
+      # The guest started five days before the account existed.
+      items!("guest", [%{key: "only_guest", tags: %{k: "g"}}, %{key: "both"}], now: days(-5))
       items!("acct", [%{key: "only_acct"}, %{key: "both"}])
-      review!("guest", "both", :pass, at: days(0))
-      review!("guest", "only_guest", :pass, at: days(0))
+      review!("guest", "both", :pass, at: days(-5))
+      review!("guest", "only_guest", :pass, at: days(-5))
       review!("acct", "both", :pass, at: days(1))
       :ok
     end
@@ -456,10 +466,20 @@ defmodule RetainTest do
       assert {:error, :not_found} = Retain.fetch_user("guest")
 
       assert %Item{level: 1, reps: 1, tags: %{"k" => "g"}} = item!("acct", "only_guest")
-      assert %Item{level: 2, reps: 2, last_reviewed_at: last} = item!("acct", "both")
+
+      assert %Item{level: 2, reps: 2, last_reviewed_at: last, inserted_at: inserted} =
+               item!("acct", "both")
+
       assert last == days(1)
+      assert inserted == days(-5)
       assert {:ok, [%{count: 3}]} = Retain.summary("acct")
       assert {:ok, %{days_active: 2}} = Retain.streak("acct", now: days(1))
+    end
+
+    test "history sees the guest's early reviews after the merge" do
+      {:ok, _} = Retain.merge_users("guest", "acct")
+      day = Retain.Clock.local_date(days(-5), tz())
+      assert {:ok, [%{count: 2, explored: 1.0}]} = Retain.history("acct", from: day, to: day)
     end
 
     test "errors" do
