@@ -14,6 +14,15 @@ defmodule RetainTest do
       assert {:ok, %User{tz: "Europe/Paris"}} = Retain.fetch_user("u1")
     end
 
+    test "new_per_day defaults from config and can be set" do
+      assert {:ok, %User{new_per_day: 10}} = Retain.put_user("u1", tz: "Etc/UTC")
+      assert {:ok, %User{new_per_day: 3}} = Retain.put_user("u1", new_per_day: 3)
+      assert {:ok, %User{new_per_day: 0}} = Retain.put_user("u1", new_per_day: 0)
+
+      assert {:error, %Ecto.Changeset{errors: [new_per_day: _]}} =
+               Retain.put_user("u1", new_per_day: -1)
+    end
+
     test "tz is required to create and must be a real zone" do
       assert {:error, %Ecto.Changeset{errors: [tz: {"can't be blank", _}]}} =
                Retain.put_user("u1")
@@ -39,23 +48,36 @@ defmodule RetainTest do
       :ok
     end
 
-    test "inserts new items at level 0, due now, and skips existing keys" do
+    test "inserts items as new by default, at level 0, and skips existing keys" do
       assert {:ok, %{inserted: 2, existing: 0}} =
                Retain.put_items(
                  "u1",
-                 [%{key: "a", tags: %{kind: :cube}, content: %{x: 1}}, %{key: "b"}],
+                 [%{key: "a", tags: %{kind: :cube}, content: %{x: 1}, position: 7}, %{key: "b"}],
                  now: t0()
                )
 
       assert {:ok, %{inserted: 1, existing: 2}} =
                Retain.put_items("u1", [%{key: "a"}, %{key: "b"}, %{key: "c"}])
 
-      assert {:ok, %Item{level: 0, due: due, reps: 0, lapses: 0, suspended: false} = a} =
+      assert {:ok,
+              %Item{level: 0, reps: 0, lapses: 0, suspended: false, started_at: nil, position: 7} =
+                a} =
                Retain.fetch_item("u1", "a")
 
-      assert due == t0()
+      assert Item.status(a) == :new
       assert a.tags == %{"kind" => "cube"}
       assert a.content == %{"x" => 1}
+      assert {:ok, []} = Retain.due("u1", now: t0())
+    end
+
+    test "status: :active starts them immediately, due now" do
+      assert {:ok, _} = Retain.put_items("u1", [%{key: "a"}], now: t0(), status: :active)
+      assert %Item{started_at: started, due: due} = item = item!("u1", "a")
+      assert started == t0()
+      assert due == t0()
+      assert Item.status(item) == :active
+      assert {:ok, [%Item{key: "a"}]} = Retain.due("u1", now: t0())
+      assert_raise ArgumentError, fn -> Retain.put_items("u1", [%{key: "z"}], status: :later) end
     end
 
     test "duplicate keys within one call are inserted once" do
@@ -146,6 +168,24 @@ defmodule RetainTest do
 
       assert %Item{level: 1, reps: 4, lapses: 1, last_reviewed_at: last} = item!("u1", "a")
       assert last == days(5)
+    end
+
+    test "reviewing a new item starts it at that instant" do
+      items!("u1", ["fresh"], status: :new)
+
+      assert {:ok, %{level_before: 0, level_after: 1}} =
+               Retain.review("u1", "fresh", :pass, at: days(3))
+
+      assert %Item{started_at: started, reps: 1} = item = item!("u1", "fresh")
+      assert started == days(3)
+      assert Item.status(item) == :active
+    end
+
+    test "a review earlier than an explicit start is out of order" do
+      items!("u1", ["later"], status: :new)
+      {:ok, %{started: 1}} = Retain.start("u1", ["later"], now: days(5))
+      assert {:error, :out_of_order} = Retain.review("u1", "later", :pass, at: days(4))
+      assert {:ok, _} = Retain.review("u1", "later", :pass, at: days(5))
     end
 
     test "stores meta verbatim on the review" do
@@ -284,14 +324,41 @@ defmodule RetainTest do
     end
 
     test "no group_by: one row" do
-      assert {:ok, [%{group: %{}, count: 4, mean_level: 0.75, due_count: 3}]} =
-               Retain.summary("u1", now: days(1))
+      assert {:ok, [row]} = Retain.summary("u1", now: days(1))
+
+      assert row == %{
+               group: %{},
+               count: 4,
+               new_count: 0,
+               active_count: 4,
+               suspended_count: 0,
+               due_count: 3,
+               mean_level: 0.75
+             }
+    end
+
+    test "new and suspended items are counted but never due" do
+      items!("u1", [%{key: "n1", tags: %{kind: "cube"}}], status: :new)
+      {:ok, _} = Retain.suspend("u1", "c2")
+
+      assert {:ok, [row]} =
+               Retain.summary("u1", tags: %{kind: "cube"}, group_by: [:kind], now: days(1))
+
+      assert row == %{
+               group: %{"kind" => "cube"},
+               count: 3,
+               new_count: 1,
+               active_count: 1,
+               suspended_count: 1,
+               due_count: 0,
+               mean_level: 1.0
+             }
     end
 
     test "group_by one key; items missing the tag group under nil" do
       assert {:ok, rows} = Retain.summary("u1", group_by: [:kind], now: days(1))
 
-      assert rows == [
+      assert Enum.map(rows, &Map.take(&1, [:group, :count, :mean_level, :due_count])) == [
                %{group: %{"kind" => nil}, count: 1, mean_level: 0.0, due_count: 1},
                %{group: %{"kind" => "cube"}, count: 2, mean_level: 1.5, due_count: 1},
                %{group: %{"kind" => "move"}, count: 1, mean_level: 0.0, due_count: 1}
@@ -308,7 +375,7 @@ defmodule RetainTest do
                  now: days(1)
                )
 
-      assert rows == [
+      assert Enum.map(rows, &Map.take(&1, [:group, :count, :mean_level, :due_count])) == [
                %{
                  group: %{"kind" => "cube", "phase" => "early"},
                  count: 1,
@@ -467,11 +534,18 @@ defmodule RetainTest do
 
       assert %Item{level: 1, reps: 1, tags: %{"k" => "g"}} = item!("acct", "only_guest")
 
-      assert %Item{level: 2, reps: 2, last_reviewed_at: last, inserted_at: inserted} =
+      assert %Item{
+               level: 2,
+               reps: 2,
+               last_reviewed_at: last,
+               inserted_at: inserted,
+               started_at: started
+             } =
                item!("acct", "both")
 
       assert last == days(1)
       assert inserted == days(-5)
+      assert started == days(-5)
       assert {:ok, [%{count: 3}]} = Retain.summary("acct")
       assert {:ok, %{days_active: 2}} = Retain.streak("acct", now: days(1))
     end
@@ -480,6 +554,16 @@ defmodule RetainTest do
       {:ok, _} = Retain.merge_users("guest", "acct")
       day = Retain.Clock.local_date(days(-5), tz())
       assert {:ok, [%{count: 2, explored: 1.0}]} = Retain.history("acct", from: day, to: day)
+    end
+
+    test "a new item merged with a started one is started either way" do
+      items!("guest", ["g_new"], status: :new)
+      items!("acct", ["g_new"])
+      items!("guest", ["a_new"])
+      items!("acct", ["a_new"], status: :new)
+      {:ok, _} = Retain.merge_users("guest", "acct")
+      assert Item.status(item!("acct", "g_new")) == :active
+      assert Item.status(item!("acct", "a_new")) == :active
     end
 
     test "errors" do

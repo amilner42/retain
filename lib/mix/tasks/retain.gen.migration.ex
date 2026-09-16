@@ -33,8 +33,8 @@ defmodule Mix.Tasks.Retain.Gen.Migration do
     defmodule #{inspect(repo)}.Migrations.#{Macro.camelize(name)} do
       use Ecto.Migration
 
-      def up, do: Retain.Migration.up()
-      def down, do: Retain.Migration.down()
+      def up, do: Retain.Migration.up(version: #{version})
+      def down, do: Retain.Migration.down(version: #{version - 1})
     end
     """)
   end

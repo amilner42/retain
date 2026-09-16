@@ -1,42 +1,52 @@
 defmodule Retain.Migration do
   @moduledoc """
-  Creates and drops Retain's tables inside a host migration.
+  Creates, upgrades and drops Retain's tables inside a host migration.
 
   Generate the host migration with `mix retain.gen.migration`, which produces:
 
-      defmodule MyApp.Repo.Migrations.AddRetain do
+      defmodule MyApp.Repo.Migrations.AddRetainV02 do
         use Ecto.Migration
 
-        def up, do: Retain.Migration.up()
-        def down, do: Retain.Migration.down()
+        def up, do: Retain.Migration.up(version: 2)
+        def down, do: Retain.Migration.down(version: 1)
       end
 
-  Migrations are versioned. `up/1` brings the schema to the latest version from whatever version
-  is installed, so re-running the generator after upgrading Retain is safe.
+  Retain's schema is versioned; the installed version is recorded on the `retain_users` table.
+  `up/1` applies every version newer than the installed one, up to `version:` (default: the
+  latest). `down/1` reverts to `version:` (default: 0, which drops everything). Re-running the
+  generator after upgrading Retain produces a migration that applies only what is new.
   """
   use Ecto.Migration
 
-  @versions [Retain.Migrations.V01]
+  @versions [Retain.Migrations.V01, Retain.Migrations.V02]
 
-  @doc "Migrates to the latest schema version."
+  @doc "Migrates from the installed version up to `version:` (default: latest)."
   @spec up(keyword()) :: :ok
   def up(opts \\ []) do
+    target = Keyword.get(opts, :version, latest_version())
     installed = installed_version()
 
-    @versions
-    |> Enum.drop(installed)
-    |> Enum.each(& &1.up(opts))
+    if target > installed do
+      @versions
+      |> Enum.slice(installed, target - installed)
+      |> Enum.each(& &1.up(opts))
+    end
 
     :ok
   end
 
-  @doc "Removes every Retain table."
+  @doc "Reverts from the installed version down to `version:` (default: 0, nothing installed)."
   @spec down(keyword()) :: :ok
   def down(opts \\ []) do
-    @versions
-    |> Enum.take(installed_version())
-    |> Enum.reverse()
-    |> Enum.each(& &1.down(opts))
+    target = Keyword.get(opts, :version, 0)
+    installed = installed_version()
+
+    if target < installed do
+      @versions
+      |> Enum.slice(target, installed - target)
+      |> Enum.reverse()
+      |> Enum.each(& &1.down(opts))
+    end
 
     :ok
   end
@@ -45,8 +55,8 @@ defmodule Retain.Migration do
   @spec latest_version() :: pos_integer()
   def latest_version, do: length(@versions)
 
-  # Versions are recorded as a comment on the retain_users table, the way Oban does it, so no
-  # extra bookkeeping table is needed.
+  # The version is a comment on the retain_users table, the way Oban does it, so no extra
+  # bookkeeping table is needed. Each version's migration sets it.
   defp installed_version do
     query = """
     SELECT obj_description(c.oid, 'pg_class')

@@ -3,7 +3,8 @@ defmodule Retain.User do
   A learner, identified by whatever id the host app already uses (`uid`), within a `scope`.
 
   Retain does no authentication. `tz` is the learner's IANA timezone and drives every calendar
-  date Retain computes for them.
+  date Retain computes for them. `new_per_day` caps how many new items `Retain.queue/2`
+  introduces per local day.
   """
   use Ecto.Schema
 
@@ -15,6 +16,7 @@ defmodule Retain.User do
     field :scope, :string
     field :uid, :string
     field :tz, :string
+    field :new_per_day, :integer
 
     has_many :items, Retain.Item
 
@@ -24,8 +26,9 @@ defmodule Retain.User do
   @doc false
   def changeset(user, attrs) do
     user
-    |> cast(attrs, [:scope, :uid, :tz])
-    |> validate_required([:scope, :uid, :tz])
+    |> cast(attrs, [:scope, :uid, :tz, :new_per_day])
+    |> validate_required([:scope, :uid, :tz, :new_per_day])
+    |> validate_number(:new_per_day, greater_than_or_equal_to: 0)
     |> validate_length(:uid, min: 1, max: 255)
     |> validate_length(:scope, min: 1, max: 255)
     |> validate_change(:tz, fn :tz, tz ->

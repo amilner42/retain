@@ -2,8 +2,8 @@ defmodule Retain.DataCase do
   @moduledoc """
   Sandboxed DB tests. Every test runs in a transaction that is rolled back.
 
-  Also provides `put_user/2`, `put_items/3` and `review!/4` fixtures that assume success, and
-  fixed instants so tests never depend on the wall clock.
+  Also provides `user!/2`, `items!/3`, `review!/4` and `item!/3` fixtures that assume success,
+  and fixed instants so tests never depend on the wall clock.
   """
   use ExUnit.CaseTemplate
 
@@ -24,7 +24,7 @@ defmodule Retain.DataCase do
     :ok
   end
 
-  # A Wednesday, 20:00 in Vancouver (PDT, UTC-7).
+  # A Tuesday, 20:00 in Vancouver (PDT, UTC-7).
   def t0, do: ~U[2026-07-15 03:00:00.000000Z]
   def tz, do: "America/Vancouver"
 
@@ -33,6 +33,8 @@ defmodule Retain.DataCase do
     user
   end
 
+  # Items are started by default so the ladder tests read naturally; pass `status: :new` for
+  # the not-yet-started path.
   def items!(uid, keys_or_items, opts \\ []) do
     items =
       Enum.map(keys_or_items, fn
@@ -40,7 +42,8 @@ defmodule Retain.DataCase do
         m when is_map(m) -> m
       end)
 
-    {:ok, result} = Retain.put_items(uid, items, Keyword.put_new(opts, :now, t0()))
+    opts = opts |> Keyword.put_new(:now, t0()) |> Keyword.put_new(:status, :active)
+    {:ok, result} = Retain.put_items(uid, items, opts)
     result
   end
 
@@ -53,6 +56,8 @@ defmodule Retain.DataCase do
     {:ok, item} = Retain.fetch_item(uid, key, opts)
     item
   end
+
+  def keys(items), do: Enum.map(items, & &1.key)
 
   def days(n, from \\ t0()), do: DateTime.add(from, n, :day)
 end

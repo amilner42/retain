@@ -5,13 +5,16 @@ defmodule Retain.Config do
       config :retain,
         repo: MyApp.Repo,
         # optional: interval in days for each ladder level, index = level
-        intervals: [0, 1, 3, 7, 21, 60, 120]
+        intervals: [0, 1, 3, 7, 21, 60, 120],
+        # optional: how many new items a user is introduced to per day, unless set per user
+        new_per_day: 10
 
   `repo` is required. Everything else has a default.
   """
 
   @default_intervals [0, 1, 3, 7, 21, 60, 120]
   @default_scope "default"
+  @default_new_per_day 10
 
   @doc "The host's `Ecto.Repo`. Raises with a setup hint when unconfigured."
   @spec repo!() :: module()
@@ -39,6 +42,19 @@ defmodule Retain.Config do
       other ->
         raise ArgumentError,
               "config :retain, :intervals must be a non-empty list, got: #{inspect(other)}"
+    end
+  end
+
+  @doc "New items per local day for users created without their own setting."
+  @spec new_per_day() :: non_neg_integer()
+  def new_per_day do
+    case Application.get_env(:retain, :new_per_day, @default_new_per_day) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      other ->
+        raise ArgumentError,
+              "config :retain, :new_per_day must be a non-negative integer, got: #{inspect(other)}"
     end
   end
 

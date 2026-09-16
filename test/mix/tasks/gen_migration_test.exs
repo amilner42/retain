@@ -9,11 +9,12 @@ defmodule Mix.Tasks.Retain.Gen.MigrationTest do
 
     try do
       Mix.Tasks.Retain.Gen.Migration.run(["-r", "Retain.TestRepo"])
-      [file] = Path.wildcard(Path.join(dir, "*_add_retain_v01.exs"))
+      v = Retain.Migration.latest_version()
+      [file] = Path.wildcard(Path.join(dir, "*_add_retain_v0#{v}.exs"))
       source = File.read!(file)
-      assert source =~ "defmodule Retain.TestRepo.Migrations.AddRetainV01 do"
-      assert source =~ "def up, do: Retain.Migration.up()"
-      assert source =~ "def down, do: Retain.Migration.down()"
+      assert source =~ "defmodule Retain.TestRepo.Migrations.AddRetainV0#{v} do"
+      assert source =~ "def up, do: Retain.Migration.up(version: #{v})"
+      assert source =~ "def down, do: Retain.Migration.down(version: #{v - 1})"
       assert Code.string_to_quoted!(source)
     after
       Application.put_env(:retain, Retain.TestRepo, config)

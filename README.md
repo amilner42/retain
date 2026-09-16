@@ -29,30 +29,40 @@ mix ecto.migrate
 
 ```elixir
 # A learner. `uid` is whatever id your app already has. `tz` is required.
-Retain.put_user("u1", tz: "America/Vancouver")
+Retain.put_user("u1", tz: "America/Vancouver", new_per_day: 10)
 
-# Things to drill. `key` is yours; `tags` filter and group; `content` is yours and never read.
+# The whole map, up front. Nothing is in rotation yet. `key` is yours; `tags` filter and
+# group; `position` is the order to introduce things; `content` is yours and never read.
 Retain.put_items("u1", [
-  %{key: "pos:8f2a/cube", tags: %{kind: "cube", phase: "bearoff"}, content: %{xgid: "..."}},
-  %{key: "pos:8f2a/move", tags: %{kind: "move", phase: "bearoff"}, content: %{xgid: "..."}}
+  %{key: "aller/present/je", tags: %{verb: "aller", tense: "present"}, position: 1},
+  %{key: "aller/present/tu", tags: %{verb: "aller", tense: "present"}, position: 2}
 ])
 
-# What to drill now: weakest and most overdue first.
-{:ok, [item | _]} = Retain.due("u1", tags: %{kind: "cube"}, limit: 10)
+# Or, for something to drill right now (a blunder you just made):
+Retain.put_items("u1", [%{key: "pos:8f2a/cube", tags: %{kind: "cube"}, content: %{xgid: "..."}}], status: :active)
 
-# How it went. You grade; Retain schedules.
+# A session: what is due, plus new items within today's budget.
+{:ok, %{reviews: reviews, new: new, new_remaining_today: 7}} =
+  Retain.queue("u1", tags: %{tense: "present"}, limit: 20)
+
+# How it went. You grade; Retain schedules. Reviewing a new item starts it.
 {:ok, %{level_before: 0, level_after: 1, due: due}} =
-  Retain.review("u1", item.key, :pass, meta: %{picked: "take", ms: 4200})
+  Retain.review("u1", hd(new).key, :pass, meta: %{typed: "vais", ms: 4200})
+
+# Or start things explicitly: the next five, or specific keys.
+Retain.start("u1", 5, tags: %{tense: "present"})
+Retain.start("u1", ["aller/present/il"])
 
 # How they're doing.
-Retain.summary("u1", group_by: [:kind])
-#=> {:ok, [%{group: %{"kind" => "cube"}, count: 23, mean_level: 1.8, due_count: 9}, ...]}
+Retain.summary("u1", group_by: [:verb])
+#=> {:ok, [%{group: %{"verb" => "aller"}, count: 24, new_count: 12, active_count: 12,
+#            suspended_count: 0, due_count: 3, mean_level: 1.8}, ...]}
 
 Retain.streak("u1")
 #=> {:ok, %{streak: 4, longest: 9, days_active: 31}}
 
-Retain.history("u1", group_by: :kind, from: ~D[2026-08-01], to: ~D[2026-08-31])
-#=> {:ok, [%{date: ~D[2026-08-01], group: "cube", count: 20, explored: 0.6, acquired: 0.31}, ...]}
+Retain.history("u1", group_by: :tense, from: ~D[2026-08-01], to: ~D[2026-08-31])
+#=> {:ok, [%{date: ~D[2026-08-01], group: "present", count: 20, explored: 0.6, acquired: 0.31}, ...]}
 
 # When a guest signs up.
 Retain.merge_users("guest-abc", "u1")
@@ -72,6 +82,13 @@ Level 6 still comes back every 120 days so it can be lost again.
 # Optional: your own intervals. Index is the level.
 config :retain, intervals: [0, 1, 2, 5, 10, 30, 90, 180]
 ```
+
+**New, active, suspended.** An item is *new* until it is started, *active* while in
+rotation, *suspended* while paused. Load the whole map as new and let `queue/2` introduce it at
+`new_per_day` per learner-local day (in `position` order, then creation order), or `start/3`
+things explicitly. Reviewing a new item starts it. `queue/2` returns due reviews and new items
+as separate lists so your UI can present them differently; pass `new: :after_reviews` to hold
+new material back until the reviews are done.
 
 **The log is the truth.** Every `review/4` appends a row and updates the item's derived fields
 (`level`, `due`, `reps`, `lapses`, `last_reviewed_at`) by folding that one review in. Reviews are

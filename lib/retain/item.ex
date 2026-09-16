@@ -1,10 +1,13 @@
 defmodule Retain.Item do
   @moduledoc """
-  Something a learner is drilling.
+  Something a learner is drilling, or will be.
 
   `key` is the host's identifier for it, unique per user. `tags` is a flat map of strings the
   host uses to filter and group. `content` is an opaque map Retain stores and returns but never
-  reads.
+  reads. `position` orders new items for introduction (lowest first, then creation order).
+
+  An item is `:new` until it is started (`started_at`), `:active` once in rotation, and
+  `:suspended` while paused; see `status/1`.
 
   The ladder fields (`level`, `due`, `reps`, `lapses`, `last_reviewed_at`) are derived from the
   item's reviews and can be rebuilt from them at any time; see `Retain.rebuild/2`.
@@ -22,6 +25,8 @@ defmodule Retain.Item do
     field :tags, :map, default: %{}
     field :content, :map, default: %{}
     field :suspended, :boolean, default: false
+    field :started_at, :utc_datetime_usec
+    field :position, :integer
 
     field :level, :integer, default: 0
     field :due, :utc_datetime_usec
@@ -34,10 +39,18 @@ defmodule Retain.Item do
     timestamps(type: :utc_datetime_usec)
   end
 
+  @type status :: :new | :active | :suspended
+
+  @doc "`:suspended` if paused, else `:new` until started, else `:active`."
+  @spec status(t()) :: status()
+  def status(%__MODULE__{suspended: true}), do: :suspended
+  def status(%__MODULE__{started_at: nil}), do: :new
+  def status(%__MODULE__{}), do: :active
+
   @doc false
   def changeset(item, attrs) do
     item
-    |> cast(attrs, [:key, :tags, :content, :suspended])
+    |> cast(attrs, [:key, :tags, :content, :suspended, :position])
     |> validate_required([:key])
     |> validate_length(:key, min: 1, max: 1024)
     |> update_change(:tags, &normalize_tags/1)

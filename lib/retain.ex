@@ -3,7 +3,7 @@ defmodule Retain do
   Plug-and-play spaced repetition for Ecto apps.
 
   Retain keeps a Leitner ladder over an append-only review log in your own Postgres. You tell it
-  what a learner is drilling and how each attempt went; it tells you what to drill next, how the
+  what a learner could drill and how each attempt went; it tells you what to drill next, how the
   learner is doing, and how that has changed over time.
 
   ## Setup
@@ -22,15 +22,17 @@ defmodule Retain do
 
   ## Usage
 
-      Retain.put_user("u1", tz: "America/Vancouver")
+      Retain.put_user("u1", tz: "America/Vancouver", new_per_day: 10)
 
+      # The whole map. Nothing is in rotation yet.
       Retain.put_items("u1", [
-        %{key: "aller/present/je", tags: %{verb: "aller", tense: "present"}},
-        %{key: "aller/present/tu", tags: %{verb: "aller", tense: "present"}}
+        %{key: "aller/present/je", tags: %{verb: "aller", tense: "present"}, position: 1},
+        %{key: "aller/present/tu", tags: %{verb: "aller", tense: "present"}, position: 2}
       ])
 
-      {:ok, [item | _]} = Retain.due("u1", tags: %{tense: "present"}, limit: 10)
-      {:ok, %{level_before: 0, level_after: 1}} = Retain.review("u1", item.key, :pass)
+      # A session: reviews that are due, plus new items within today's budget.
+      {:ok, %{reviews: reviews, new: new}} = Retain.queue("u1", tags: %{tense: "present"})
+      {:ok, %{level_before: 0, level_after: 1}} = Retain.review("u1", hd(new).key, :pass)
 
       Retain.summary("u1", group_by: [:verb])
       Retain.streak("u1")
@@ -40,12 +42,16 @@ defmodule Retain do
 
     * **Item** — something to drill. Identified by a `key` you choose, unique per user. Carries a
       flat `tags` map for filtering and grouping and an opaque `content` map Retain never reads.
+    * **New / active / suspended** — an item is *new* until it is started, *active* while in
+      rotation, *suspended* while paused. `put_items/3` adds items as new by default, so a host
+      can load a whole map up front; `queue/2` introduces them a few per day, or `start/3` does
+      it explicitly. Reviewing a new item starts it.
     * **Review** — one attempt, with an outcome of `:pass`, `:partial` or `:fail`. Reviews are
       never updated or deleted; every other number Retain reports is derived from them.
     * **Ladder** — level 0..6 per item; `:pass` climbs, `:partial` holds, `:fail` drops. Each
       level has an interval; see `Retain.Ladder`.
     * **User** — whoever your app says. `uid` is any string; `tz` is required because "today"
-      and "due today" are calendar concepts.
+      and "due today" are calendar concepts; `new_per_day` is their budget of new items.
     * **Scope** — an optional partition of users (default `"default"`). One host serving several
       apps can keep their learners apart; a single app can ignore it.
 
@@ -77,11 +83,21 @@ defmodule Retain do
   @type summary_row :: %{
           required(:group) => %{optional(String.t()) => String.t() | nil},
           required(:count) => non_neg_integer(),
-          required(:mean_level) => float(),
-          required(:due_count) => non_neg_integer()
+          required(:new_count) => non_neg_integer(),
+          required(:active_count) => non_neg_integer(),
+          required(:suspended_count) => non_neg_integer(),
+          required(:due_count) => non_neg_integer(),
+          required(:mean_level) => float()
         }
 
-  @default_due_limit 20
+  @typedoc "What `queue/2` hands the host for a session."
+  @type queue :: %{
+          reviews: [Item.t()],
+          new: [Item.t()],
+          new_remaining_today: non_neg_integer()
+        }
+
+  @default_limit 20
   @insert_chunk 1_000
 
   ## Users
@@ -89,19 +105,30 @@ defmodule Retain do
   @doc """
   Creates or updates a user.
 
-  `tz:` (an IANA name such as `"America/Vancouver"`) is required when creating and optional
-  when updating.
+  Options:
 
-      Retain.put_user("u1", tz: "Europe/Paris")
+    * `tz:` — an IANA name such as `"America/Vancouver"`. Required when creating.
+    * `new_per_day:` — how many new items `queue/2` may introduce per local day. Defaults to
+      `config :retain, new_per_day:` (10) when creating.
+
+      Retain.put_user("u1", tz: "Europe/Paris", new_per_day: 5)
   """
   @spec put_user(uid(), keyword()) :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
   def put_user(uid, opts \\ []) when is_binary(uid) do
     scope = scope(opts)
-    attrs = %{scope: scope, uid: uid} |> put_if(:tz, opts[:tz])
+
+    attrs =
+      %{scope: scope, uid: uid}
+      |> put_if(:tz, opts[:tz])
+      |> put_if(:new_per_day, opts[:new_per_day])
 
     case repo().get_by(User, scope: scope, uid: uid) do
-      nil -> %User{} |> User.changeset(attrs) |> repo().insert()
-      user -> user |> User.changeset(attrs) |> repo().update()
+      nil ->
+        attrs = Map.put_new(attrs, :new_per_day, Config.new_per_day())
+        %User{} |> User.changeset(attrs) |> repo().insert()
+
+      user ->
+        user |> User.changeset(attrs) |> repo().update()
     end
   end
 
@@ -119,7 +146,8 @@ defmodule Retain do
   account.
 
   Items whose key already exists on `into_uid` have their reviews merged into the existing item,
-  which is then re-derived from the combined log. Both users must exist.
+  which is then re-derived from the combined log; it counts as started if either copy was. Both
+  users must exist.
 
   Returns how many items were moved and how many were merged.
   """
@@ -134,36 +162,35 @@ defmodule Retain do
       repo().transaction(fn ->
         ladder = ladder()
 
-        into_keys =
-          repo().all(from i in Item, where: i.user_id == ^into.id, select: {i.key, i.id})
-          |> Map.new()
+        into_by_key =
+          repo().all(from i in Item, where: i.user_id == ^into.id) |> Map.new(&{&1.key, &1})
 
         from_items = repo().all(from i in Item, where: i.user_id == ^from.id)
 
         {moved, merged} =
           Enum.reduce(from_items, {0, 0}, fn item, {moved, merged} ->
-            case Map.fetch(into_keys, item.key) do
+            case Map.fetch(into_by_key, item.key) do
               :error ->
                 repo().update!(Ecto.Changeset.change(item, user_id: into.id))
                 {moved + 1, merged}
 
-              {:ok, target_id} ->
+              {:ok, target} ->
                 repo().update_all(from(r in Review, where: r.item_id == ^item.id),
-                  set: [item_id: target_id]
+                  set: [item_id: target.id]
                 )
 
                 repo().delete!(item)
 
                 # The merged log may start before the target item did; an item must predate
                 # its reviews or history would ignore the early ones.
-                repo().update_all(
-                  from(i in Item,
-                    where: i.id == ^target_id and i.inserted_at > ^item.inserted_at
-                  ),
-                  set: [inserted_at: item.inserted_at]
+                target
+                |> Ecto.Changeset.change(
+                  inserted_at: earliest(target.inserted_at, item.inserted_at),
+                  started_at: earliest(target.started_at, item.started_at)
                 )
+                |> repo().update!()
 
-                rederive_item!(target_id, ladder)
+                rederive_item!(target.id, ladder)
                 {moved, merged + 1}
             end
           end)
@@ -181,10 +208,14 @@ defmodule Retain do
   with overlapping sets.
 
   Each item is a map with `:key` (required), `:tags` (a flat map of strings; atoms are
-  converted) and `:content` (any map). New items start at level 0, due immediately. Pass
-  `suspended: true` to add them paused instead; see `resume/3`.
+  converted), `:content` (any map) and `:position` (an integer; new items are introduced lowest
+  first). Options:
 
-      Retain.put_items("u1", [%{key: "pos:abc", tags: %{kind: "cube"}, content: %{xgid: "..."}}])
+    * `status:` — `:new` (default) adds items to the map without starting them; `:active`
+      starts them now, level 0 and due immediately.
+    * `suspended:` — add them paused.
+
+      Retain.put_items("u1", [%{key: "pos:abc", tags: %{kind: "cube"}, content: %{xgid: "..."}}], status: :active)
       #=> {:ok, %{inserted: 1, existing: 0}}
 
   Returns `{:error, {:invalid_item, index, changeset}}` for the first invalid item, in which
@@ -194,8 +225,15 @@ defmodule Retain do
           {:ok, %{inserted: non_neg_integer(), existing: non_neg_integer()}}
           | {:error, :not_found | {:invalid_item, non_neg_integer(), Ecto.Changeset.t()}}
   def put_items(uid, items, opts \\ []) when is_binary(uid) and is_list(items) do
+    status = Keyword.get(opts, :status, :new)
+
+    unless status in [:new, :active] do
+      raise ArgumentError, "status: must be :new or :active, got: #{inspect(status)}"
+    end
+
     with {:ok, user} <- fetch_user(uid, opts),
-         {:ok, rows} <- item_rows(user, items, now(opts), Keyword.get(opts, :suspended, false)) do
+         {:ok, rows} <-
+           item_rows(user, items, now(opts), status, Keyword.get(opts, :suspended, false)) do
       inserted =
         rows
         |> Enum.chunk_every(@insert_chunk)
@@ -224,7 +262,43 @@ defmodule Retain do
     end
   end
 
-  @doc "Pauses an item: it stops appearing in `due/2` and cannot be reviewed until resumed."
+  @doc """
+  Puts new items into rotation now, at level 0 and due immediately.
+
+  Pass a list of keys to start those, or an integer to start the next that many in introduction
+  order (`position`, then creation), optionally within `tags:`. Items already started or
+  suspended are skipped. Started items count against today's `new_per_day` budget.
+
+      Retain.start("u1", ["aller/present/je"])
+      Retain.start("u1", 5, tags: %{tense: "present"})
+      #=> {:ok, %{started: 5}}
+  """
+  @spec start(uid(), [key()] | non_neg_integer(), keyword()) ::
+          {:ok, %{started: non_neg_integer()}} | {:error, :not_found}
+  def start(uid, keys_or_count, opts \\ []) when is_binary(uid) do
+    with {:ok, user} <- fetch_user(uid, opts) do
+      now = now(opts)
+
+      ids =
+        case keys_or_count do
+          keys when is_list(keys) ->
+            new_items_query(user, opts) |> where([i], i.key in ^keys) |> select([i], i.id)
+
+          count when is_integer(count) and count >= 0 ->
+            new_items_query(user, opts) |> limit(^count) |> select([i], i.id)
+        end
+        |> repo().all()
+
+      {started, _} =
+        repo().update_all(from(i in Item, where: i.id in ^ids),
+          set: [started_at: now, due: now, updated_at: now]
+        )
+
+      {:ok, %{started: started}}
+    end
+  end
+
+  @doc "Pauses an item: it leaves `queue/2` and `due/2` and cannot be reviewed until resumed."
   @spec suspend(uid(), key(), keyword()) :: {:ok, Item.t()} | {:error, :not_found}
   def suspend(uid, key, opts \\ []), do: set_suspended(uid, key, true, opts)
 
@@ -236,12 +310,12 @@ defmodule Retain do
 
   @doc """
   Records an attempt and moves the item on the ladder. This is the only write that changes
-  ladder state, and it is the only way to.
+  ladder state, and it is the only way to. Reviewing a new item starts it.
 
   `outcome` is `:pass`, `:partial` or `:fail`. Options:
 
-    * `at:` — when it happened; defaults to now. Must not be earlier than the item's previous
-      review or its creation, so the log stays in order (`{:error, :out_of_order}`).
+    * `at:` — when it happened; defaults to now. Must not be earlier than the item's creation,
+      start or previous review, so the log stays in order (`{:error, :out_of_order}`).
     * `meta:` — any map to keep with the review (what was answered, timing). Retain stores it
       and never reads it.
 
@@ -262,21 +336,16 @@ defmodule Retain do
         item =
           repo().one(
             from i in Item, where: i.user_id == ^user.id and i.key == ^key, lock: "FOR UPDATE"
-          ) ||
-            repo().rollback(:not_found)
+          ) || repo().rollback(:not_found)
 
         if item.suspended, do: repo().rollback(:suspended)
         unless in_order?(item, at), do: repo().rollback(:out_of_order)
 
-        next =
-          Fold.apply(
-            Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at]),
-            ladder(),
-            outcome,
-            at
-          )
+        state = Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at])
+        next = Fold.apply(state, ladder(), outcome, at)
+        changes = if item.started_at, do: next, else: Map.put(next, :started_at, at)
 
-        repo().update!(Ecto.Changeset.change(item, next))
+        repo().update!(Ecto.Changeset.change(item, changes))
         review = repo().insert!(%Review{item_id: item.id, outcome: outcome, at: at, meta: meta})
 
         %{level_before: item.level, level_after: next.level, due: next.due, review_id: review.id}
@@ -287,11 +356,50 @@ defmodule Retain do
   ## Reads
 
   @doc """
-  Items to drill, weakest and most overdue first.
+  A session's worth of work: the reviews that are due, and the new items to introduce.
 
-  Returns items whose `due` is at or before `before:` (default: the start of tomorrow in the
-  user's timezone, i.e. everything due today), excluding suspended ones, ordered by level
-  ascending then due ascending, at most `limit:` (default #{@default_due_limit}).
+  `reviews` is `due/2`. `new` is the next not-yet-started items in introduction order, at most
+  the user's `new_per_day` minus however many were started today already (by any path), and at
+  most `new_limit:` if given. `new_remaining_today` is that budget before this call.
+
+  Options: `tags:`, `before:`, `limit:` (reviews) and `now:` as in `due/2`; `new_limit:`; and
+  `new: :after_reviews` to hold new items back until nothing is due (default `:always`).
+
+      Retain.queue("u1", tags: %{tense: "present"}, limit: 20)
+      #=> {:ok, %{reviews: [...], new: [...], new_remaining_today: 7}}
+  """
+  @spec queue(uid(), keyword()) :: {:ok, queue()} | {:error, :not_found}
+  def queue(uid, opts \\ []) when is_binary(uid) do
+    with {:ok, user} <- fetch_user(uid, opts),
+         {:ok, reviews} <- due(uid, opts) do
+      now = now(opts)
+      remaining = max(user.new_per_day - started_today_count(user, now), 0)
+
+      new_limit =
+        case Keyword.get(opts, :new_limit) do
+          nil -> remaining
+          n when is_integer(n) and n >= 0 -> min(n, remaining)
+        end
+
+      hold_back = Keyword.get(opts, :new, :always) == :after_reviews and reviews != []
+
+      new =
+        if new_limit == 0 or hold_back do
+          []
+        else
+          new_items_query(user, opts) |> limit(^new_limit) |> repo().all()
+        end
+
+      {:ok, %{reviews: reviews, new: new, new_remaining_today: remaining}}
+    end
+  end
+
+  @doc """
+  Active items to review, weakest and most overdue first.
+
+  Returns started, unsuspended items whose `due` is at or before `before:` (default: the start
+  of tomorrow in the user's timezone, i.e. everything due today), ordered by level ascending
+  then due ascending, at most `limit:` (default #{@default_limit}).
 
   `tags:` restricts to items whose tags contain every given pair.
 
@@ -301,11 +409,12 @@ defmodule Retain do
   def due(uid, opts \\ []) when is_binary(uid) do
     with {:ok, user} <- fetch_user(uid, opts) do
       before = usec(Keyword.get(opts, :before) || Clock.start_of_tomorrow(now(opts), user.tz))
-      limit = Keyword.get(opts, :limit, @default_due_limit)
+      limit = Keyword.get(opts, :limit, @default_limit)
 
       items =
         Item
-        |> where([i], i.user_id == ^user.id and not i.suspended and i.due <= ^before)
+        |> where([i], i.user_id == ^user.id and not i.suspended)
+        |> where([i], not is_nil(i.started_at) and i.due <= ^before)
         |> filter_tags(opts[:tags])
         |> order_by([i], asc: i.level, asc: i.due, asc: i.id)
         |> limit(^limit)
@@ -319,11 +428,15 @@ defmodule Retain do
   Aggregates over a user's items, grouped by tag values.
 
   `group_by:` is a list of tag keys; each row's `:group` maps those keys to the item's values
-  (`nil` where an item lacks the tag). With no `group_by:` there is one row. `tags:` filters
-  as in `due/2`. `due_count` counts unsuspended items due by `before:` (default: end of today).
+  (`nil` where an item lacks the tag). With no `group_by:` there is one row. `tags:` filters as
+  in `due/2`.
+
+  Per row: `count` (all items), `new_count`, `active_count`, `suspended_count`, `due_count`
+  (active items due by `before:`, default end of today) and `mean_level` over all items.
 
       Retain.summary("u1", group_by: [:kind])
-      #=> {:ok, [%{group: %{"kind" => "cube"}, count: 23, mean_level: 1.8, due_count: 9}, ...]}
+      #=> {:ok, [%{group: %{"kind" => "cube"}, count: 23, new_count: 4, active_count: 19,
+                   suspended_count: 0, due_count: 9, mean_level: 1.8}, ...]}
   """
   @spec summary(uid(), keyword()) :: {:ok, [summary_row()]} | {:error, :not_found}
   def summary(uid, opts \\ []) when is_binary(uid) do
@@ -335,19 +448,31 @@ defmodule Retain do
         Item
         |> where([i], i.user_id == ^user.id)
         |> filter_tags(opts[:tags])
-        |> select([i], {i.tags, i.level, i.due, i.suspended})
+        |> select([i], %{
+          tags: i.tags,
+          level: i.level,
+          due: i.due,
+          suspended: i.suspended,
+          started_at: i.started_at
+        })
         |> repo().all()
-        |> Enum.group_by(fn {tags, _, _, _} -> Map.new(keys, &{&1, tags[&1]}) end)
+        |> Enum.group_by(&Map.new(keys, fn k -> {k, &1.tags[k]} end))
         |> Enum.map(fn {group, members} ->
+          statuses = Enum.map(members, &Item.status(struct(Item, &1)))
           count = length(members)
-          level_sum = members |> Enum.map(fn {_, level, _, _} -> level end) |> Enum.sum()
 
-          due_count =
-            Enum.count(members, fn {_, _, due, suspended} ->
-              not suspended and DateTime.compare(due, before) != :gt
-            end)
-
-          %{group: group, count: count, mean_level: level_sum / count, due_count: due_count}
+          %{
+            group: group,
+            count: count,
+            new_count: Enum.count(statuses, &(&1 == :new)),
+            active_count: Enum.count(statuses, &(&1 == :active)),
+            suspended_count: Enum.count(statuses, &(&1 == :suspended)),
+            due_count:
+              Enum.count(members, fn m ->
+                not m.suspended and m.started_at != nil and DateTime.compare(m.due, before) != :gt
+              end),
+            mean_level: (members |> Enum.map(& &1.level) |> Enum.sum()) / count
+          }
         end)
         |> Enum.sort_by(& &1.group)
 
@@ -406,7 +531,8 @@ defmodule Retain do
       `group: nil`.
     * `tags:` — filters items as in `due/2`.
 
-  Computed by replaying the log; see `Retain.History`.
+  Computed by replaying the log; see `Retain.History`. Days before a group's first item have no
+  reading.
   """
   @spec history(uid(), keyword()) :: {:ok, [History.point()]} | {:error, :not_found}
   def history(uid, opts \\ []) when is_binary(uid) do
@@ -479,7 +605,13 @@ defmodule Retain do
   defp put_if(map, _key, nil), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
 
-  defp item_rows(user, items, now, suspended) do
+  defp earliest(nil, b), do: b
+  defp earliest(a, nil), do: a
+  defp earliest(a, b), do: if(DateTime.compare(a, b) == :gt, do: b, else: a)
+
+  defp item_rows(user, items, now, status, suspended) do
+    started_at = if status == :active, do: now
+
     items
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, [], MapSet.new()}, fn {attrs, index}, {:ok, rows, seen} ->
@@ -499,7 +631,12 @@ defmodule Retain do
             |> Map.put_new(:content, %{})
             |> Map.put_new(:suspended, suspended)
             |> Map.merge(Fold.initial(now))
-            |> Map.merge(%{user_id: user.id, inserted_at: now, updated_at: now})
+            |> Map.merge(%{
+              user_id: user.id,
+              started_at: started_at,
+              inserted_at: now,
+              updated_at: now
+            })
 
           {:cont, {:ok, [row | rows], MapSet.put(seen, changeset.changes.key)}}
       end
@@ -516,9 +653,31 @@ defmodule Retain do
     end
   end
 
+  # Not-yet-started, unsuspended items in introduction order.
+  defp new_items_query(user, opts) do
+    Item
+    |> where([i], i.user_id == ^user.id and is_nil(i.started_at) and not i.suspended)
+    |> filter_tags(opts[:tags])
+    |> order_by([i], asc_nulls_last: i.position, asc: i.inserted_at, asc: i.id)
+  end
+
+  defp started_today_count(user, now) do
+    today = Clock.local_date(now, user.tz)
+
+    Item
+    |> where([i], i.user_id == ^user.id and not is_nil(i.started_at))
+    |> where(
+      [i],
+      fragment("((? AT TIME ZONE 'UTC') AT TIME ZONE ?)::date", i.started_at, ^user.tz) == ^today
+    )
+    |> repo().aggregate(:count)
+  end
+
   defp in_order?(item, at) do
-    DateTime.compare(at, item.inserted_at) != :lt and
-      (is_nil(item.last_reviewed_at) or DateTime.compare(at, item.last_reviewed_at) != :lt)
+    not_before = fn earlier -> is_nil(earlier) or DateTime.compare(at, earlier) != :lt end
+
+    not_before.(item.inserted_at) and not_before.(item.started_at) and
+      not_before.(item.last_reviewed_at)
   end
 
   defp filter_tags(query, nil), do: query
@@ -541,7 +700,9 @@ defmodule Retain do
           select: {r.outcome, r.at}
       )
 
-    repo().update!(Ecto.Changeset.change(item, Fold.replay(item.inserted_at, ladder, reviews)))
+    # A never-started item has no reviews; a started one is due from its start.
+    origin = item.started_at || item.inserted_at
+    repo().update!(Ecto.Changeset.change(item, Fold.replay(origin, ladder, reviews)))
   end
 
   # dates: distinct local dates, descending.
