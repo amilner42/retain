@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Initial release: users, items, reviews, ladder, `due`, `summary`, `streak`, `history`,
-  `merge_users`, `rebuild`, migration generator.
-- Items are new until started: `put_items` `status:`, `start/3`, `queue/2` with a per-user
-  `new_per_day` budget, `position` ordering, status counts in `summary`. Schema V02.
+Initial release.
+
+- Users with a timezone and a daily budget of new items.
+- Items with opaque `content`, flat `tags`, `position`; new until started, suspendable.
+- Append-only reviews; a Leitner ladder folded over them; `rebuild` replays the log.
+- `queue`, `due`, `summary`, `streak`, `history`, `start`, `merge_users`.
+- Versioned schema with a migration generator.

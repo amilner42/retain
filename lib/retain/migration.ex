@@ -4,11 +4,11 @@ defmodule Retain.Migration do
 
   Generate the host migration with `mix retain.gen.migration`, which produces:
 
-      defmodule MyApp.Repo.Migrations.AddRetainV02 do
+      defmodule MyApp.Repo.Migrations.AddRetainV01 do
         use Ecto.Migration
 
-        def up, do: Retain.Migration.up(version: 2)
-        def down, do: Retain.Migration.down(version: 1)
+        def up, do: Retain.Migration.up(version: 1)
+        def down, do: Retain.Migration.down(version: 0)
       end
 
   Retain's schema is versioned; the installed version is recorded on the `retain_users` table.
@@ -18,7 +18,7 @@ defmodule Retain.Migration do
   """
   use Ecto.Migration
 
-  @versions [Retain.Migrations.V01, Retain.Migrations.V02]
+  @versions [Retain.Migrations.V01]
 
   @doc "Migrates from the installed version up to `version:` (default: latest)."
   @spec up(keyword()) :: :ok

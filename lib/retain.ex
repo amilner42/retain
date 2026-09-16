@@ -298,13 +298,25 @@ defmodule Retain do
     end
   end
 
-  @doc "Pauses an item: it leaves `queue/2` and `due/2` and cannot be reviewed until resumed."
-  @spec suspend(uid(), key(), keyword()) :: {:ok, Item.t()} | {:error, :not_found}
-  def suspend(uid, key, opts \\ []), do: set_suspended(uid, key, true, opts)
+  @doc """
+  Pauses items: they leave `queue/2` and `due/2` and cannot be reviewed until resumed. Takes a
+  key or a list of keys; unknown keys are ignored.
 
-  @doc "Un-pauses an item. Its ladder state is exactly as it was when suspended."
-  @spec resume(uid(), key(), keyword()) :: {:ok, Item.t()} | {:error, :not_found}
-  def resume(uid, key, opts \\ []), do: set_suspended(uid, key, false, opts)
+      Retain.suspend("u1", ["aller/present/je", "aller/present/tu"])
+      #=> {:ok, %{suspended: 2}}
+  """
+  @spec suspend(uid(), key() | [key()], keyword()) ::
+          {:ok, %{suspended: non_neg_integer()}} | {:error, :not_found}
+  def suspend(uid, keys, opts \\ []) when is_binary(uid) do
+    with {:ok, n} <- set_suspended(uid, List.wrap(keys), true, opts), do: {:ok, %{suspended: n}}
+  end
+
+  @doc "Un-pauses items. Their ladder state is exactly as it was when suspended."
+  @spec resume(uid(), key() | [key()], keyword()) ::
+          {:ok, %{resumed: non_neg_integer()}} | {:error, :not_found}
+  def resume(uid, keys, opts \\ []) when is_binary(uid) do
+    with {:ok, n} <- set_suspended(uid, List.wrap(keys), false, opts), do: {:ok, %{resumed: n}}
+  end
 
   ## Reviews
 
@@ -647,9 +659,15 @@ defmodule Retain do
     end
   end
 
-  defp set_suspended(uid, key, suspended, opts) do
-    with {:ok, item} <- fetch_item(uid, key, opts) do
-      item |> Ecto.Changeset.change(suspended: suspended) |> repo().update()
+  defp set_suspended(uid, keys, suspended, opts) do
+    with {:ok, user} <- fetch_user(uid, opts) do
+      {n, _} =
+        from(i in Item,
+          where: i.user_id == ^user.id and i.key in ^keys and i.suspended != ^suspended
+        )
+        |> repo().update_all(set: [suspended: suspended, updated_at: now(opts)])
+
+      {:ok, n}
     end
   end
 

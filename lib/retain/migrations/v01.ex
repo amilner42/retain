@@ -7,6 +7,7 @@ defmodule Retain.Migrations.V01 do
       add :scope, :string, null: false
       add :uid, :string, null: false
       add :tz, :string, null: false
+      add :new_per_day, :integer, null: false, default: 10
 
       timestamps(type: :utc_datetime_usec)
     end
@@ -18,8 +19,11 @@ defmodule Retain.Migrations.V01 do
       add :key, :string, null: false, size: 1024
       add :tags, :map, null: false, default: %{}
       add :content, :map, null: false, default: %{}
+      add :position, :integer
       add :suspended, :boolean, null: false, default: false
+      add :started_at, :utc_datetime_usec
 
+      # Derived from retain_reviews; see Retain.Fold and Retain.rebuild/2.
       add :level, :integer, null: false, default: 0
       add :due, :utc_datetime_usec, null: false
       add :reps, :integer, null: false, default: 0
@@ -31,6 +35,7 @@ defmodule Retain.Migrations.V01 do
 
     create unique_index(:retain_items, [:user_id, :key])
     create index(:retain_items, [:user_id, :suspended, :due, :level])
+    create index(:retain_items, [:user_id, :started_at])
     create index(:retain_items, [:tags], using: :gin)
 
     create table(:retain_reviews) do

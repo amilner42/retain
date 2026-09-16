@@ -7,9 +7,9 @@ defmodule Retain.MigrationRoundtripTest do
 
   alias Retain.TestRepo
 
-  # The host-side migration files in priv/test_repo/migrations, one per Retain version.
+  # The host-side migration file in priv/test_repo/migrations. When Retain grows a V02, add a
+  # second file there and extend the walk below.
   @v1 20_260_101_000_000
-  @v2 20_260_916_000_000
 
   test "down to 0 and up to latest, version by version" do
     # The migrator opens its own connections (one holds the migration lock), which the sandbox
@@ -20,14 +20,10 @@ defmodule Retain.MigrationRoundtripTest do
     Code.put_compiler_option(:ignore_module_conflict, true)
 
     try do
-      Ecto.Migrator.run(TestRepo, :down, to: @v2, log: false)
-      assert installed() == 1
       Ecto.Migrator.run(TestRepo, :down, to: @v1, log: false)
       assert installed() == 0
       Ecto.Migrator.run(TestRepo, :up, to: @v1, log: false)
       assert installed() == 1
-      Ecto.Migrator.run(TestRepo, :up, to: @v2, log: false)
-      assert installed() == 2
     after
       # Whatever happened, leave the schema at latest for the other tests.
       Ecto.Migrator.run(TestRepo, :up, all: true, log: false)

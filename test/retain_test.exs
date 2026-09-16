@@ -132,12 +132,21 @@ defmodule RetainTest do
     end
 
     test "round trip, and reviews are refused while suspended" do
-      assert {:ok, %Item{suspended: true}} = Retain.suspend("u1", "a")
+      assert {:ok, %{suspended: 1}} = Retain.suspend("u1", "a")
+      assert Item.status(item!("u1", "a")) == :suspended
       assert {:error, :suspended} = Retain.review("u1", "a", :pass, at: t0())
       assert {:ok, []} = Retain.due("u1", now: t0())
-      assert {:ok, %Item{suspended: false}} = Retain.resume("u1", "a")
+      assert {:ok, %{resumed: 1}} = Retain.resume("u1", "a")
       assert {:ok, [%Item{key: "a"}]} = Retain.due("u1", now: t0())
-      assert {:error, :not_found} = Retain.suspend("u1", "zzz")
+    end
+
+    test "takes lists, counts only changes, ignores unknown keys" do
+      items!("u1", ["b", "c"])
+      assert {:ok, %{suspended: 2}} = Retain.suspend("u1", ["a", "b", "zzz"])
+      assert {:ok, %{suspended: 1}} = Retain.suspend("u1", ["b", "c"])
+      assert {:ok, %{resumed: 3}} = Retain.resume("u1", ["a", "b", "c"])
+      assert {:ok, %{resumed: 0}} = Retain.resume("u1", "a")
+      assert {:error, :not_found} = Retain.suspend("nobody", "a")
     end
   end
 

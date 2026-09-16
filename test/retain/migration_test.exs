@@ -2,10 +2,10 @@ defmodule Retain.MigrationTest do
   use Retain.DataCase, async: true
 
   test "the installed version is recorded on the users table" do
-    assert %{rows: [["2"]]} =
+    assert %{rows: [["1"]]} =
              Repo.query!("SELECT obj_description('retain_users'::regclass, 'pg_class')")
 
-    assert Retain.Migration.latest_version() == 2
+    assert Retain.Migration.latest_version() == 1
   end
 
   test "the tables exist with their indexes" do
