@@ -143,8 +143,9 @@ defmodule Retain do
   end
 
   @doc """
-  Moves everything from one user to another and deletes the first. For turning a guest into an
-  account.
+  Moves everything from one uid onto another and deletes the first. For when the same person
+  ends up with two ids (a pre-signup id and an account, two devices). Not needed if every
+  learner has one stable id.
 
   Items whose key already exists on `into_uid` have their reviews merged into the existing item,
   which is then re-derived from the combined log; it counts as started if either copy was. Both

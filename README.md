@@ -68,8 +68,8 @@ Retain.streak("u1")
 Retain.history("u1", group_by: :tense, from: ~D[2026-08-01], to: ~D[2026-08-31])
 #=> {:ok, [%{date: ~D[2026-08-01], group: "present", count: 20, explored: 0.6, acquired: 0.31}, ...]}
 
-# When a guest signs up.
-Retain.merge_users("guest-abc", "u1")
+# If one person ends up with two ids.
+Retain.merge_users("old-uid", "u1")
 ```
 
 Every function returns `{:ok, _}` or `{:error, reason}`. Unknown users and items are
