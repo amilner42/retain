@@ -43,7 +43,7 @@ defmodule Retain.RebuildPropertyTest do
 
       assert point.count == count
       assert_in_delta point.explored, explored, 1.0e-9
-      assert_in_delta point.acquired, mean / 6, 1.0e-9
+      assert_in_delta point.acquired, mean / 7, 1.0e-9
     end
   end
 

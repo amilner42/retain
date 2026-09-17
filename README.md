@@ -77,10 +77,12 @@ Every function returns `{:ok, _}` or `{:error, reason}`. Unknown users and items
 
 ## How it works
 
-**The ladder.** Every item has a level from 0 to 6. `:pass` climbs one, `:partial` holds,
-`:fail` drops one, `:known` jumps to the top. Each level has an interval — `0, 1, 3, 7, 21, 60, 120` days by default — and
+**The ladder.** Every item has a level from 0 to 7. `:pass` climbs one, `:partial` holds,
+`:fail` drops one, `:known` jumps to the top. Each level has an interval — `0, 1, 3, 7, 21, 58, 145, 365` days by default — and
 an item is due that many days after its last review. New items are level 0 and due immediately.
-Level 6 still comes back every 120 days so it can be lost again.
+Level 7 still comes back every year so it can be lost again. The curve is the one FSRS's
+default weights produce for a card that is always answered "good", with Anki's one-day first
+step in front; see the prior art in the docs.
 
 ```elixir
 # Optional: your own intervals. Index is the level.
@@ -106,6 +108,25 @@ the edges.
 
 **Streaks are simple.** A day counts if the learner reviewed anything. Today counts as soon as
 they do; until then the streak is whatever it was yesterday. No XP, no goals, no freezes.
+
+## Why these intervals
+
+Every spaced-repetition system lands on roughly the same curve: ×2.5–3 per step, a short first
+step, a top between four months and a year.
+
+| System | Intervals |
+|---|---|
+| Leitner (1972) | 1, 2, 4, 8, 16 days |
+| SM-2 / Anki, always "good" | 1, 6, 15, 38, 94, 235, 588… |
+| WaniKani | 4h, 8h, 1d, 2d, 1w, 2w, 1mo, 4mo, then retired |
+| Memrise | 4h, 12h, 1d, 6d, 12d, 48d, 96d, 180d |
+| FSRS default weights, always "good" | 2, 7, 21, 58, 145, 365 |
+| **Retain** | 0, 1, 3, 7, 21, 58, 145, 365 |
+
+FSRS's weights are fit to a very large body of real review data at 90% target retention, so its
+"good" sequence is the most evidence-backed shape available; Retain uses it with Anki's one-day
+first step in front. A card that is never missed is seen on days 0, 1, 4, 11, 32, 90, 235 and
+600, then yearly.
 
 ## What Retain does not do
 

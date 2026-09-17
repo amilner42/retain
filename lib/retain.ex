@@ -49,7 +49,7 @@ defmodule Retain do
     * **Review** — one attempt, with an outcome of `:pass`, `:partial` or `:fail`, or `:known`
       for "I already know this" (see `master/3`). Reviews are never updated or deleted; every
       other number Retain reports is derived from them.
-    * **Ladder** — level 0..6 per item; `:pass` climbs, `:partial` holds, `:fail` drops. Each
+    * **Ladder** — level 0..7 per item; `:pass` climbs, `:partial` holds, `:fail` drops. Each
       level has an interval; see `Retain.Ladder`.
     * **User** — whoever your app says. `uid` is any string; `tz` is required because "today"
       and "due today" are calendar concepts; `new_per_day` is their budget of new items.

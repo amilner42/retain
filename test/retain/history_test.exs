@@ -3,7 +3,7 @@ defmodule Retain.HistoryTest do
 
   alias Retain.{History, Ladder}
 
-  @ladder Ladder.new([0, 1, 3, 7, 21, 60, 120])
+  @ladder Ladder.new([0, 1, 3, 7, 21, 58, 145, 365])
   @tz "America/Vancouver"
   # 20:00 local on 2026-07-14
   @t0 ~U[2026-07-15 03:00:00Z]
@@ -40,10 +40,10 @@ defmodule Retain.HistoryTest do
     series = History.series(events, @ladder, @tz, d(0), d(4))
     by_date = Map.new(series, &{&1.date, &1})
 
-    assert by_date[d(0)] == %{date: d(0), group: nil, count: 2, explored: 0.5, acquired: 1 / 12}
-    assert by_date[d(1)] == %{date: d(1), group: nil, count: 2, explored: 0.5, acquired: 2 / 12}
+    assert by_date[d(0)] == %{date: d(0), group: nil, count: 2, explored: 0.5, acquired: 1 / 14}
+    assert by_date[d(1)] == %{date: d(1), group: nil, count: 2, explored: 0.5, acquired: 2 / 14}
     assert by_date[d(2)] == by_date[d(1)] |> Map.put(:date, d(2))
-    assert by_date[d(3)] == %{date: d(3), group: nil, count: 2, explored: 1.0, acquired: 2 / 12}
+    assert by_date[d(3)] == %{date: d(3), group: nil, count: 2, explored: 1.0, acquired: 2 / 14}
     assert by_date[d(4)] == by_date[d(3)] |> Map.put(:date, d(4))
   end
 
@@ -51,7 +51,7 @@ defmodule Retain.HistoryTest do
     events = [{:item, 1, nil, t(0)}, {:review, 1, :pass, t(0)}, {:review, 1, :pass, t(5)}]
 
     assert History.series(events, @ladder, @tz, d(2), d(2)) ==
-             [%{date: d(2), group: nil, count: 1, explored: 1.0, acquired: 1 / 6}]
+             [%{date: d(2), group: nil, count: 1, explored: 1.0, acquired: 1 / 7}]
   end
 
   test "groups are separate series, appearing when their first item does" do
@@ -66,7 +66,7 @@ defmodule Retain.HistoryTest do
     assert series == [
              %{date: d(0), group: "cube", count: 1, explored: 0.0, acquired: 0.0},
              %{date: d(1), group: "cube", count: 1, explored: 0.0, acquired: 0.0},
-             %{date: d(1), group: "move", count: 1, explored: 1.0, acquired: 1 / 6}
+             %{date: d(1), group: "move", count: 1, explored: 1.0, acquired: 1 / 7}
            ]
   end
 
@@ -87,7 +87,7 @@ defmodule Retain.HistoryTest do
              History.series(Enum.reverse(events), @ladder, @tz, d(0), d(2))
 
     assert [_, _, %{acquired: sixth}] = History.series(events, @ladder, @tz, d(0), d(2))
-    assert sixth == 1 / 6
+    assert sixth == 1 / 7
   end
 
   test "days are local: a review at 23:30 Vancouver counts for that local date" do

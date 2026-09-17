@@ -11,17 +11,17 @@ defmodule Retain.Ladder do
 
   The top level still resurfaces at its interval so it can be lost again.
 
-      iex> ladder = Retain.Ladder.new([0, 1, 3, 7, 21, 60, 120])
+      iex> ladder = Retain.Ladder.new([0, 1, 3, 7, 21, 58, 145, 365])
       iex> Retain.Ladder.step(ladder, 2, :pass)
       3
-      iex> Retain.Ladder.step(ladder, 6, :pass)
-      6
+      iex> Retain.Ladder.step(ladder, 7, :pass)
+      7
       iex> Retain.Ladder.step(ladder, 0, :fail)
       0
       iex> Retain.Ladder.step(ladder, 4, :partial)
       4
       iex> Retain.Ladder.step(ladder, 1, :known)
-      6
+      7
       iex> Retain.Ladder.interval_days(ladder, 3)
       7
       iex> Retain.Ladder.due_after(ladder, 3, ~U[2026-01-01 12:00:00Z])

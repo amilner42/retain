@@ -163,8 +163,8 @@ defmodule RetainTest do
       assert {:ok, %{mastered: 3}} = Retain.master("u1", ["a", "b", "fresh", "zzz"], now: days(1))
 
       for key <- ["a", "b", "fresh"] do
-        assert %Item{level: 6, due: due, started_at: started} = item!("u1", key)
-        assert due == days(121)
+        assert %Item{level: 7, due: due, started_at: started} = item!("u1", key)
+        assert due == days(366)
         assert started != nil
       end
 
@@ -177,12 +177,12 @@ defmodule RetainTest do
       {:ok, _} = Retain.master("u1", "b", now: days(1))
       Repo.update_all(Item, set: [level: 0])
       {:ok, _} = Retain.rebuild("u1")
-      assert item!("u1", "b").level == 6
+      assert item!("u1", "b").level == 7
 
       day = Retain.Clock.local_date(days(1), tz())
       assert {:ok, [%{acquired: acquired}]} = Retain.history("u1", from: day, to: day)
-      # a at level 1, b at 6, fresh at 0 -> 7 / 18
-      assert_in_delta acquired, 7 / 18, 1.0e-9
+      # a at level 1, b at 7, fresh at 0 -> 8 / 21
+      assert_in_delta acquired, 8 / 21, 1.0e-9
     end
 
     test "skips suspended items, is atomic on out-of-order" do
@@ -206,7 +206,7 @@ defmodule RetainTest do
     end
 
     test ":known is a valid outcome" do
-      assert {:ok, %{level_before: 0, level_after: 6}} =
+      assert {:ok, %{level_before: 0, level_after: 7}} =
                Retain.review("u1", "a", :known, at: t0())
     end
 
@@ -301,7 +301,7 @@ defmodule RetainTest do
       )
       |> Enum.each(fn {:ok, {:ok, _}} -> :ok end)
 
-      assert %Item{reps: 20, level: 6} = item!("u1", "a")
+      assert %Item{reps: 20, level: 7} = item!("u1", "a")
     end
   end
 
@@ -543,7 +543,7 @@ defmodule RetainTest do
                group: nil,
                count: 2,
                explored: 0.5,
-               acquired: 2 / 12
+               acquired: 2 / 14
              }
 
       assert {:ok, points} = Retain.history("u1", now: days(40))
@@ -556,9 +556,9 @@ defmodule RetainTest do
                Retain.history("u1", from: ~D[2026-07-14], to: ~D[2026-07-15], group_by: :kind)
 
       assert points == [
-               %{date: ~D[2026-07-14], group: "cube", count: 1, explored: 1.0, acquired: 1 / 6},
+               %{date: ~D[2026-07-14], group: "cube", count: 1, explored: 1.0, acquired: 1 / 7},
                %{date: ~D[2026-07-14], group: "move", count: 1, explored: 0.0, acquired: 0.0},
-               %{date: ~D[2026-07-15], group: "cube", count: 1, explored: 1.0, acquired: 2 / 6},
+               %{date: ~D[2026-07-15], group: "cube", count: 1, explored: 1.0, acquired: 2 / 7},
                %{date: ~D[2026-07-15], group: "move", count: 1, explored: 0.0, acquired: 0.0}
              ]
 
@@ -569,7 +569,7 @@ defmodule RetainTest do
                  tags: %{kind: "cube"}
                )
 
-      assert acquired == 2 / 6
+      assert acquired == 2 / 7
     end
 
     test "unknown user" do

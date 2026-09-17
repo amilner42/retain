@@ -5,14 +5,14 @@ defmodule Retain.Config do
       config :retain,
         repo: MyApp.Repo,
         # optional: interval in days for each ladder level, index = level
-        intervals: [0, 1, 3, 7, 21, 60, 120],
+        intervals: [0, 1, 3, 7, 21, 58, 145, 365],
         # optional: how many new items a user is introduced to per day, unless set per user
         new_per_day: 10
 
   `repo` is required. Everything else has a default.
   """
 
-  @default_intervals [0, 1, 3, 7, 21, 60, 120]
+  @default_intervals [0, 1, 3, 7, 21, 58, 145, 365]
   @default_scope "default"
   @default_new_per_day 10
 

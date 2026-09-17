@@ -27,7 +27,7 @@ defmodule Retain.ConcurrencyTest do
           |> Enum.map(fn {:ok, result} -> result end)
 
         assert Enum.all?(results, &match?({:ok, _}, &1))
-        assert {:ok, %Item{reps: 40, level: 6, lapses: 0}} = Retain.fetch_item(uid, "a")
+        assert {:ok, %Item{reps: 40, level: 7, lapses: 0}} = Retain.fetch_item(uid, "a")
         assert TestRepo.aggregate(Retain.Review, :count) >= 40
       after
         TestRepo.delete!(user)

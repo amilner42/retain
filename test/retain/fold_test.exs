@@ -3,7 +3,7 @@ defmodule Retain.FoldTest do
 
   alias Retain.{Fold, Ladder}
 
-  @ladder Ladder.new([0, 1, 3, 7, 21, 60, 120])
+  @ladder Ladder.new([0, 1, 3, 7, 21, 58, 145, 365])
   @t0 ~U[2026-07-15 03:00:00Z]
 
   test "initial state is level 0 and due at creation" do
@@ -57,14 +57,14 @@ defmodule Retain.FoldTest do
     s = Fold.apply(Fold.initial(@t0), @ladder, :known, @t0)
 
     assert s == %{
-             level: 6,
-             due: DateTime.add(@t0, 120, :day),
+             level: 7,
+             due: DateTime.add(@t0, 365, :day),
              reps: 1,
              lapses: 0,
              last_reviewed_at: @t0
            }
 
-    assert %{level: 5, lapses: 1} = Fold.apply(s, @ladder, :fail, s.due)
+    assert %{level: 6, lapses: 1} = Fold.apply(s, @ladder, :fail, s.due)
   end
 
   test "replay is the same as applying one by one" do

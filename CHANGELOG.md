@@ -9,3 +9,4 @@ Initial release.
 - Append-only reviews; a Leitner ladder folded over them; `rebuild` replays the log.
 - `queue`, `due`, `summary`, `streak`, `history`, `start`, `master`, `suspend`, `merge_users`.
 - Versioned schema with a migration generator.
+- Default ladder `0, 1, 3, 7, 21, 58, 145, 365` days: eight levels, a year at the top.

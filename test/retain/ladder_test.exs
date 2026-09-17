@@ -6,11 +6,11 @@ defmodule Retain.LadderTest do
 
   doctest Ladder
 
-  @ladder Ladder.new([0, 1, 3, 7, 21, 60, 120])
+  @ladder Ladder.new([0, 1, 3, 7, 21, 58, 145, 365])
 
   test "default ladder comes from config" do
     assert Ladder.default() == @ladder
-    assert Ladder.max(@ladder) == 6
+    assert Ladder.max(@ladder) == 7
   end
 
   test "rejects bad intervals" do
@@ -21,8 +21,8 @@ defmodule Retain.LadderTest do
 
   test "interval_days is only defined for real levels" do
     assert Ladder.interval_days(@ladder, 0) == 0
-    assert Ladder.interval_days(@ladder, 6) == 120
-    assert_raise FunctionClauseError, fn -> Ladder.interval_days(@ladder, 7) end
+    assert Ladder.interval_days(@ladder, 7) == 365
+    assert_raise FunctionClauseError, fn -> Ladder.interval_days(@ladder, 8) end
     assert_raise FunctionClauseError, fn -> Ladder.interval_days(@ladder, -1) end
   end
 
@@ -36,15 +36,15 @@ defmodule Retain.LadderTest do
   end
 
   property "step always lands on a real level, and moves at most one except for :known" do
-    check all level <- integer(0..6), outcome <- member_of(Ladder.outcomes()) do
+    check all level <- integer(0..7), outcome <- member_of(Ladder.outcomes()) do
       next = Ladder.step(@ladder, level, outcome)
-      assert next in 0..6
-      if outcome == :known, do: assert(next == 6), else: assert(abs(next - level) <= 1)
+      assert next in 0..7
+      if outcome == :known, do: assert(next == 7), else: assert(abs(next - level) <= 1)
     end
   end
 
   property "pass never lowers, fail never raises, partial never moves" do
-    check all level <- integer(0..6) do
+    check all level <- integer(0..7) do
       assert Ladder.step(@ladder, level, :pass) >= level
       assert Ladder.step(@ladder, level, :fail) <= level
       assert Ladder.step(@ladder, level, :partial) == level
@@ -52,7 +52,7 @@ defmodule Retain.LadderTest do
   end
 
   property "due_after is exactly interval days later" do
-    check all level <- integer(0..6), offset <- integer(0..100_000) do
+    check all level <- integer(0..7), offset <- integer(0..100_000) do
       at = DateTime.add(~U[2026-01-01 00:00:00Z], offset, :second)
       due = Ladder.due_after(@ladder, level, at)
       assert DateTime.diff(due, at, :day) == Ladder.interval_days(@ladder, level)
