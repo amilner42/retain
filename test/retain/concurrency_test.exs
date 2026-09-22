@@ -256,8 +256,10 @@ defmodule Retain.ConcurrencyTest do
           end
         end)
 
+      # Neither a deadlock nor an out-of-order refusal: a batch that queued behind another
+      # writer used to be stamped with the time it started and rejected for it.
       assert Enum.all?(results, &match?({:ok, _}, &1)),
-             "deadlocked: #{inspect(Enum.reject(results, &match?({:ok, _}, &1)))}"
+             "refused under contention: #{inspect(Enum.reject(results, &match?({:ok, _}, &1)))}"
 
       assert_log_is_truth(uid, keys)
     after

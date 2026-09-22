@@ -397,8 +397,6 @@ defmodule Retain do
           {:ok, %{mastered: non_neg_integer()}} | {:error, :not_found | :out_of_order}
   def master(uid, keys, opts \\ []) when is_binary(uid) do
     with {:ok, user} <- fetch_user(uid, opts) do
-      at = now(opts)
-
       repo().transaction(fn ->
         # In item-id order, not the caller's: every path that locks more than one row of
         # retain_items takes them in the same order, or two callers holding each other's next
@@ -407,7 +405,10 @@ defmodule Retain do
         user
         |> keys_in_lock_order(List.wrap(keys))
         |> Enum.reduce(%{mastered: 0}, fn key, acc ->
-          case do_entry(user, key, :known, at, opts, %{}, nil) do
+          # Each row is stamped once its own lock is held, like every other entry. Taking one
+          # timestamp for the whole batch up front meant a batch that queued behind another
+          # writer was stamped before the entry it now follows, and refused as out of order.
+          case do_entry(user, key, :known, given_at(opts), opts, %{}, nil) do
             {:ok, _} -> %{acc | mastered: acc.mastered + 1}
             {:error, reason} when reason in [:not_found, :suspended] -> acc
             {:error, reason} -> repo().rollback(reason)
