@@ -67,6 +67,32 @@ defmodule Retain.LogTest do
     assert Log.entries(Enum.reverse(rows)) == [Fold.entry(:pass, at(0))]
   end
 
+  test "corrections of one row are a tree, and the newest leaf wins" do
+    # O has two corrections; one of those has a correction of its own. Following a single
+    # chain from O picks whichever child it happens to keep and never sees row 4 at all.
+    rows = [
+      row(1, :fail, 0),
+      row(2, :pass, 1, supersedes_id: 1),
+      row(3, :partial, 2, supersedes_id: 1),
+      row(4, :known, 3, supersedes_id: 2)
+    ]
+
+    assert Log.entries(rows) == [Fold.entry(:known, at(0))]
+    assert Log.entries(Enum.reverse(rows)) == [Fold.entry(:known, at(0))]
+  end
+
+  test "the newest leaf is by instant, wherever it sits in the tree" do
+    # The deepest correction is not the newest one here: row 3 is.
+    rows = [
+      row(1, :fail, 0),
+      row(2, :pass, 1, supersedes_id: 1),
+      row(3, :partial, 9, supersedes_id: 1),
+      row(4, :known, 2, supersedes_id: 2)
+    ]
+
+    assert Log.entries(rows) == [Fold.entry(:partial, at(0))]
+  end
+
   test "a defer keeps its until; an entry that is not a defer has none" do
     until = at(30)
     rows = [row(1, :pass, 0), row(2, :defer, 1, until: until)]
@@ -79,6 +105,17 @@ defmodule Retain.LogTest do
 
     # Both rows are amendments, so neither is an entry: nothing to fold, and no loop.
     assert Log.entries(rows) == []
+
+    # A real entry whose corrections loop below it still terminates, and still answers.
+    looped = [
+      row(1, :fail, 0),
+      row(2, :pass, 1, supersedes_id: 1),
+      row(3, :known, 2, supersedes_id: 2),
+      row(4, :partial, 3, supersedes_id: 3),
+      %{row(5, :again, 4, supersedes_id: 4) | id: 2}
+    ]
+
+    assert [%{at: _}] = Log.entries(looped)
   end
 
   test "entry_row?/1 is what the ordering check asks" do

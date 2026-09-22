@@ -224,16 +224,18 @@ defmodule Retain do
       repo().transaction(fn ->
         ladder = ladder()
 
+        # Lock every row either side of the merge, up front, in item-id order. Doing it per
+        # from-item as the merge walked them locked the *target* rows in an order that
+        # depended on which user was being merged, so two merges into one account could hold
+        # each other's next row. One order for every multi-row path is the whole rule.
+        lock_items(
+          repo().all(from i in Item, where: i.user_id in ^[from.id, into.id], select: i.id)
+        )
+
         into_by_key =
           repo().all(from i in Item, where: i.user_id == ^into.id) |> Map.new(&{&1.key, &1})
 
-        # Lock what we are about to move, in a fixed order, so a review landing on the old uid
-        # mid-merge either happens first (and is carried over) or waits for the new home; and so
-        # two merges into the same user cannot deadlock each other.
-        from_items =
-          repo().all(
-            from i in Item, where: i.user_id == ^from.id, order_by: i.id, lock: "FOR UPDATE"
-          )
+        from_items = repo().all(from i in Item, where: i.user_id == ^from.id, order_by: i.id)
 
         {moved, merged} =
           Enum.reduce(from_items, {0, 0}, fn item, {moved, merged} ->
@@ -354,18 +356,20 @@ defmodule Retain do
       now = now(opts)
 
       repo().transaction(fn ->
-        # Lock the rows we picked, then re-check that they are still new in the update itself.
-        # Both halves matter: the lock makes a concurrent `review/4` of the same item wait (it
-        # takes the same lock), and the condition means that if the review got there first we
-        # start nothing rather than overwriting the ladder state it just wrote.
-        ids =
+        # Pick in introduction order, then lock in item-id order (`lock_items/1`), then
+        # re-check that they are still new in the update itself. All three matter: picking
+        # decides *which*, the lock makes a concurrent `review/4` of the same item wait, and
+        # the condition means that if the review got there first we start nothing rather than
+        # overwriting the ladder state it just wrote.
+        picked =
           case keys_or_count do
             keys when is_list(keys) -> new_items_query(user, opts) |> where([i], i.key in ^keys)
             count -> new_items_query(user, opts) |> limit(^count)
           end
           |> select([i], i.id)
-          |> lock("FOR UPDATE")
           |> repo().all()
+
+        ids = lock_items(picked)
 
         {started, _} =
           repo().update_all(
@@ -396,8 +400,14 @@ defmodule Retain do
       at = now(opts)
 
       repo().transaction(fn ->
-        Enum.reduce(List.wrap(keys), %{mastered: 0}, fn key, acc ->
-          case do_entry(user, key, :known, at, %{}, nil) do
+        # In item-id order, not the caller's: every path that locks more than one row of
+        # retain_items takes them in the same order, or two callers holding each other's next
+        # row deadlock. Keys that name nothing are dropped here rather than ignored later --
+        # the count is of what moved either way.
+        user
+        |> keys_in_lock_order(List.wrap(keys))
+        |> Enum.reduce(%{mastered: 0}, fn key, acc ->
+          case do_entry(user, key, :known, at, opts, %{}, nil) do
             {:ok, _} -> %{acc | mastered: acc.mastered + 1}
             {:error, reason} when reason in [:not_found, :suspended] -> acc
             {:error, reason} -> repo().rollback(reason)
@@ -453,12 +463,11 @@ defmodule Retain do
           {:ok, review_result()}
           | {:error, :not_found | :suspended | :invalid_outcome | :out_of_order}
   def review(uid, key, outcome, opts \\ []) when is_binary(uid) and is_binary(key) do
-    at = usec(Keyword.get(opts, :at) || now(opts))
     meta = meta!(opts)
 
     with :ok <- if(Ladder.outcome?(outcome), do: :ok, else: {:error, :invalid_outcome}),
          {:ok, user} <- fetch_user(uid, opts) do
-      in_transaction(fn -> do_entry(user, key, outcome, at, meta, nil) end)
+      in_transaction(fn -> do_entry(user, key, outcome, given_at(opts), opts, meta, nil) end)
     end
   end
 
@@ -469,17 +478,24 @@ defmodule Retain do
   A defer is a row in the log like any other, so `rebuild/2` and `history/2` reproduce it — but
   it is not an attempt, so it does not count towards `streak/2`, `reps` or `explored`.
 
+  The item must be **in rotation**: a new one is `{:error, :not_started}`. Deferring something
+  that has not started would mean nothing (a new item's `due` is not what `queue/2` reads), and
+  `start/3` would overwrite it a moment later — which is the one way the derived state and the
+  log could disagree. Start it, then defer it.
+
       Retain.defer("u1", "pos:abc", DateTime.add(DateTime.utc_now(), 3, :day))
       #=> {:ok, %{level_before: 2, level_after: 2, due: ~U[...], review_id: 43}}
   """
   @spec defer(uid(), key(), DateTime.t(), keyword()) ::
-          {:ok, review_result()} | {:error, :not_found | :suspended | :out_of_order}
+          {:ok, review_result()}
+          | {:error, :not_found | :suspended | :not_started | :out_of_order}
   def defer(uid, key, %DateTime{} = until, opts \\ []) when is_binary(uid) and is_binary(key) do
-    at = usec(Keyword.get(opts, :at) || now(opts))
     meta = meta!(opts)
 
     with {:ok, user} <- fetch_user(uid, opts) do
-      in_transaction(fn -> do_entry(user, key, :defer, at, meta, usec(until)) end)
+      in_transaction(fn ->
+        do_entry(user, key, :defer, given_at(opts), opts, meta, usec(until))
+      end)
     end
   end
 
@@ -503,7 +519,6 @@ defmodule Retain do
           | {:error, :not_found | :suspended | :invalid_outcome | :not_amendable}
   def amend(uid, key, review_id, outcome, opts \\ [])
       when is_binary(uid) and is_binary(key) and is_integer(review_id) do
-    at = usec(Keyword.get(opts, :at) || now(opts))
     meta = meta!(opts)
 
     with :ok <- if(Ladder.outcome?(outcome), do: :ok, else: {:error, :invalid_outcome}),
@@ -512,6 +527,11 @@ defmodule Retain do
         with {:ok, item} <- lock_item(user, key),
              :ok <- if(item.suspended, do: {:error, :suspended}, else: :ok),
              {:ok, superseded} <- amendable(item, review_id) do
+          # Stamped after the lock: two corrections of the same answer arriving together must
+          # be ordered as they are applied, or the one that waited would look older than the
+          # one that went first and silently lose to it.
+          at = given_at(opts) || now(opts)
+
           row =
             repo().insert!(%Review{
               item_id: item.id,
@@ -546,10 +566,43 @@ defmodule Retain do
     end)
   end
 
+  # An explicit `at:`, or nil to say "read the clock once the row is locked".
+  defp given_at(opts) do
+    case Keyword.get(opts, :at) do
+      nil -> nil
+      at -> usec(at)
+    end
+  end
+
   defp meta!(opts) do
     meta = Keyword.get(opts, :meta, %{})
     unless is_map(meta), do: raise(ArgumentError, "meta: must be a map, got: #{inspect(meta)}")
     meta
+  end
+
+  # THE lock order for retain_items: ascending item id, everywhere, always. Any path that
+  # takes more than one row of this table goes through here, so two of them can queue behind
+  # each other but never hold what the other needs next.
+  defp lock_items([]), do: []
+
+  defp lock_items(ids) do
+    repo().all(
+      from i in Item,
+        where: i.id in ^ids,
+        order_by: i.id,
+        select: i.id,
+        lock: "FOR UPDATE"
+    )
+  end
+
+  # The given keys that this user actually has, in item-id order.
+  defp keys_in_lock_order(user, keys) do
+    repo().all(
+      from i in Item,
+        where: i.user_id == ^user.id and i.key in ^keys,
+        order_by: i.id,
+        select: i.key
+    )
   end
 
   defp lock_item(user, key) do
@@ -574,11 +627,22 @@ defmodule Retain do
   # The body of review/4 and defer/4, to run inside a transaction. Writes nothing unless it
   # succeeds, so a caller batching several (master/3) can skip failures without poisoning its
   # transaction.
-  defp do_entry(user, key, outcome, at, meta, until) do
+  defp do_entry(user, key, outcome, at, opts, meta, until) do
     with {:ok, item} <- lock_item(user, key) do
+      # The clock is read after the lock, never before it. Two attempts that arrive together
+      # are applied one after the other, and the one that waited must be stamped after the one
+      # that went first -- otherwise it is refused as out of order for having queued.
+      at = at || now(opts)
+
       cond do
         item.suspended ->
           {:error, :suspended}
+
+        # A defer does not start an item, so a deferred new item would have `start/3` write
+        # `due` back over it with no log row to show for it -- and the rebuild would then
+        # re-apply the defer and disagree. Rotation first.
+        outcome == :defer and is_nil(item.started_at) ->
+          {:error, :not_started}
 
         not in_order?(item, at) ->
           {:error, :out_of_order}
@@ -587,11 +651,9 @@ defmodule Retain do
           state = Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at])
           next = Fold.apply(state, ladder(), Fold.entry(outcome, at, until))
 
-          # An attempt on a new item starts it; deferring one only moves its due date.
+          # An attempt on a new item starts it. A defer never reaches here unstarted.
           changes =
-            if item.started_at || outcome == :defer,
-              do: next,
-              else: Map.put(next, :started_at, at)
+            if item.started_at, do: next, else: Map.put(next, :started_at, at)
 
           repo().update!(Ecto.Changeset.change(item, changes))
 

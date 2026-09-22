@@ -52,7 +52,7 @@ Retain.put_items("u1", [%{key: "pos:8f2a/cube", tags: %{kind: "cube"}, content: 
 # "That was really a pass." The log stays append-only; the correction supersedes the row.
 Retain.amend("u1", hd(new).key, id, :pass)
 
-# "Not today." Moves the due date, keeps the level.
+# "Not today." Moves the due date, keeps the level. Only for items already in rotation.
 Retain.defer("u1", "aller/present/tu", DateTime.add(DateTime.utc_now(), 3, :day))
 
 # Or start things explicitly: the next five, or specific keys.
@@ -112,11 +112,17 @@ fields; the result is always identical to what live reviews produced, and a prop
 so. `history/2` runs the same fold day by day. Change the intervals, run rebuild, done.
 
 **Corrections append too.** `amend/5` does not edit the row it corrects; it writes a new one that
-supersedes it, and `Retain.Log` resolves the chain before the fold ever sees it — so the
-correction takes effect *where the original was in time*, and a rebuild of an amended log equals
-a rebuild of a log that had said the right thing all along. A property test says that too.
+supersedes it, and `Retain.Log` resolves them before the fold ever sees them — so the correction
+takes effect *where the original was in time*, and a rebuild of an amended log equals a rebuild
+of a log that had said the right thing all along. A property test says that too. A host re-amends
+whatever `review_id` it was last handed, so the corrections of one answer are a tree rather than
+a line; the newest leaf anywhere in it wins.
+
 `defer/4` is a log row as well, so burying an item survives a rebuild; it is not an attempt, so
-it moves no counter and no streak.
+it moves no counter and no streak. It needs an item already in rotation — a new one is
+`{:error, :not_started}`. That is not fussiness: a defer does not start anything, so `start/3`
+would write `due` back over it a moment later with no log row to show for it, and the rebuild
+would then disagree with what you could see. The log stays the truth by not letting that happen.
 
 **Retain does not police when you review.** It does not check that an item was due and it cannot
 tell a first answer from a retry — every call is another row. If only the first answer at a due
@@ -167,9 +173,15 @@ mix dialyzer
 mix docs
 ```
 
-`test/retain/concurrency_test.exs` runs outside the sandbox on real connections and interleaves
-`start`, `review`, `suspend` and `put_user`; `test/retain/scale_test.exs` asserts the query
-*plans* for a 5,000-item deck, so a lost index is a failure rather than a slow day.
+`test/retain/concurrency_test.exs` interleaves `start`, `review`, `suspend`, `master`,
+`merge_users` and `put_user` on **real connections**. That is worth spelling out, because this
+file used to only look like it did: `Sandbox.unboxed_run/2` plus `Task` inherits `$callers`, so
+eight "concurrent" tasks shared one `pg_backend_pid` and no `FOR UPDATE` in the library was ever
+contended. It runs in `:auto` mode now and measures the number of backends it got, so it cannot
+quietly go back to running single-file.
+
+`test/retain/scale_test.exs` asserts the query *plans* for a 5,000-item deck rather than a
+wall-clock bound, so a lost index is a failure rather than a slow day.
 
 ## License
 

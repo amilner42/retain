@@ -86,13 +86,36 @@ defmodule Retain.AmendTest do
       assert {:ok, %{streak: 1, days_active: 1}} = Retain.streak("u1", now: t0())
     end
 
-    test "it does not start a new item" do
+    test "a new item cannot be deferred: it is not in rotation yet" do
       items!("u1", ["fresh"], status: :new)
-      {:ok, _} = Retain.defer("u1", "fresh", days(30), at: t0())
+      assert {:error, :not_started} = Retain.defer("u1", "fresh", days(30), at: t0())
 
-      assert %Item{started_at: nil} = item = item!("u1", "fresh")
+      # Nothing was written, by either half of the call.
+      assert %Item{started_at: nil, due: due} = item = item!("u1", "fresh")
       assert Item.status(item) == :new
-      assert item.due == days(30)
+      assert due == t0()
+      assert Repo.aggregate(Retain.Review, :count) == 0
+
+      # Started, it defers like anything else.
+      {:ok, %{started: 1}} = Retain.start("u1", ["fresh"], now: days(1))
+      assert {:ok, _} = Retain.defer("u1", "fresh", days(30), at: days(1))
+      assert item!("u1", "fresh").due == days(30)
+    end
+
+    test "starting after a deferred new item cannot make live and rebuilt disagree" do
+      # The bug this rule exists for: `start/3` writes `due` with no log row, so a defer that
+      # had landed first was re-applied by the rebuild and the two answers differed
+      # (live 07-16, rebuilt 07-20). Refusing the defer closes it at the source -- a defer can
+      # now only ever sit *after* the start it would have fought with.
+      items!("u1", ["fresh"], status: :new)
+      assert {:error, :not_started} = Retain.defer("u1", "fresh", days(5), at: t0())
+      {:ok, %{started: 1}} = Retain.start("u1", ["fresh"], now: days(1))
+
+      live = derived(item!("u1", "fresh"))
+      assert live.due == days(1)
+
+      {:ok, _} = Retain.rebuild("u1")
+      assert derived(item!("u1", "fresh")) == live
     end
 
     test "refuses suspended, unknown and out-of-order" do
@@ -102,6 +125,9 @@ defmodule Retain.AmendTest do
 
       assert {:error, :not_found} = Retain.defer("u1", "zzz", days(3))
       assert {:error, :not_found} = Retain.defer("nobody", "a", days(3))
+
+      items!("u1", ["unstarted"], status: :new)
+      assert {:error, :not_started} = Retain.defer("u1", "unstarted", days(3), at: t0())
 
       assert {:error, :out_of_order} =
                Retain.defer("u1", "a", days(3), at: DateTime.add(t0(), -1, :second))
@@ -153,6 +179,24 @@ defmodule Retain.AmendTest do
       {:ok, _} = Retain.amend("u1", "a", second, :known, at: days(2))
 
       assert %Item{level: 7, reps: 1, lapses: 0} = item!("u1", "a")
+    end
+
+    test "a tree of corrections takes the newest leaf, not the end of one chain" do
+      # The host re-amends whatever review_id it was last handed, so the corrections of one
+      # answer are a tree: O has two children and one of those has a child of its own. The
+      # newest correction anywhere in that tree is the answer -- following a single chain
+      # picked the wrong branch and dropped the newest one entirely.
+      {:ok, %{review_id: original}} = Retain.review("u1", "a", :fail, at: t0())
+      {:ok, %{review_id: first}} = Retain.amend("u1", "a", original, :pass, at: days(1))
+      {:ok, _} = Retain.amend("u1", "a", original, :partial, at: days(2))
+      {:ok, _} = Retain.amend("u1", "a", first, :known, at: days(3))
+
+      assert %Item{level: 7, reps: 1, lapses: 0} = item!("u1", "a")
+
+      # ...and a rebuild reads the tree the same way the live write did.
+      before = derived(item!("u1", "a"))
+      {:ok, _} = Retain.rebuild("u1")
+      assert derived(item!("u1", "a")) == before
     end
 
     test "amending the same row twice takes the later amendment" do

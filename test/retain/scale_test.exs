@@ -54,6 +54,36 @@ defmodule Retain.ScaleTest do
     IO.puts("\n  due/2 over #{@items} items: #{ms(queries)} ms\n#{indent(plan)}")
   end
 
+  test "a caught-up deck with only a few cards due still reads the index, not the table" do
+    # The shape the index is worst at: 4,000 in rotation and only a handful due, all of them
+    # at the top level, so a scan in (level, due) order walks every lower level before it
+    # finds one. It is still an index scan of a compact index -- measured at a fifth of a
+    # millisecond -- which is why the ordering leads with `level` and not with `due`.
+    # Leading with `due` is faster here and 28x slower on a backlog, where it also has to sort
+    # the whole due set instead of stopping at `limit`.
+    Repo.query!("""
+    UPDATE retain_items
+    SET level = CASE WHEN id % 200 = 0 THEN 7 ELSE id % 7 END,
+        due = CASE WHEN id % 200 = 0
+                   THEN #{quoted(days(-2))}
+                   ELSE #{quoted(days(40))} END
+    WHERE started_at IS NOT NULL
+    """)
+
+    Repo.query!("ANALYZE retain_items")
+
+    {{:ok, items}, queries} = capture(fn -> Retain.due("big", limit: 20, now: t0()) end)
+    assert items != []
+
+    plan = explain(pick(queries, "retain_items"))
+
+    assert plan =~ "retain_items_due_index", plan
+    refute plan =~ "Seq Scan on retain_items", plan
+    refute plan =~ "Sort", plan
+
+    IO.puts("\n  due/2, 4000 active and a handful due at the top level: #{ms(queries)} ms")
+  end
+
   test "queue/2 reads its indexes and never scans the deck to count today's new items" do
     {{:ok, %{reviews: reviews}}, queries} =
       capture(fn -> Retain.queue("big", limit: 20, now: t0()) end)
@@ -138,4 +168,6 @@ defmodule Retain.ScaleTest do
   end
 
   defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("    " <> &1))
+
+  defp quoted(%DateTime{} = at), do: "TIMESTAMP '#{DateTime.to_naive(at)}'"
 end

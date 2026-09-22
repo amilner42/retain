@@ -11,8 +11,11 @@ defmodule Retain.Log do
   exactly the state a log that had said `:pass` yesterday would have produced. That is the whole
   point: `Retain.rebuild/2` over an amended log equals a rebuild of the corrected log.
 
-  Chains take the last word. Amend an amendment and the newest wins; amend the same row twice
-  and the later amendment wins (ties broken by row id, so the resolution is total and stable).
+  Corrections take the last word, and "last" is over the whole tree of them, not one chain.
+  A host that amends a row twice, or amends an amendment, or does both, hands back whichever
+  `review_id` it was last given -- so the amendments of one entry form a tree rather than a
+  line, and the newest leaf anywhere in that tree is the answer. Ties break on row id, so the
+  resolution is total and stable.
   """
 
   alias Retain.{Fold, Ladder}
@@ -34,17 +37,12 @@ defmodule Retain.Log do
   @spec entries([row()]) :: [Fold.entry()]
   def entries(rows) do
     rows = sort(rows)
-
-    # Sorted ascending, so a later amendment of the same row overwrites an earlier one here.
-    amendments =
-      rows
-      |> Enum.filter(& &1.supersedes_id)
-      |> Map.new(&{&1.supersedes_id, &1})
+    corrections = rows |> Enum.filter(& &1.supersedes_id) |> Enum.group_by(& &1.supersedes_id)
 
     rows
     |> Enum.reject(& &1.supersedes_id)
     |> Enum.map(fn row ->
-      last = last_word(row, amendments, MapSet.new([row.id]))
+      last = last_word(row, corrections)
       Fold.entry(last.outcome, row.at, last.until)
     end)
   end
@@ -57,17 +55,23 @@ defmodule Retain.Log do
   # DateTime compares `day` before `month`).
   defp sort(rows), do: Enum.sort_by(rows, &{DateTime.to_unix(&1.at, :microsecond), &1.id})
 
-  defp last_word(row, amendments, seen) do
-    case Map.fetch(amendments, row.id) do
-      {:ok, next} ->
-        # A chain can only point backwards in time, so this cannot loop; guard anyway rather
-        # than hang on a log some other writer corrupted.
-        if MapSet.member?(seen, next.id),
-          do: row,
-          else: last_word(next, amendments, MapSet.put(seen, next.id))
-
-      :error ->
-        row
+  # The newest correction anywhere under `row`, or `row` itself when it has none.
+  defp last_word(row, corrections) do
+    case subtree(corrections, [row.id], MapSet.new([row.id]), []) do
+      [] -> row
+      found -> Enum.max_by(found, &{DateTime.to_unix(&1.at, :microsecond), &1.id})
     end
+  end
+
+  # Everything under these ids, breadth first. The visited set is global rather than per
+  # branch, so a log some other writer corrupted into a cycle terminates instead of hanging.
+  defp subtree(_corrections, [], _seen, found), do: found
+
+  defp subtree(corrections, [id | rest], seen, found) do
+    children =
+      corrections |> Map.get(id, []) |> Enum.reject(&MapSet.member?(seen, &1.id))
+
+    seen = Enum.reduce(children, seen, fn child, acc -> MapSet.put(acc, child.id) end)
+    subtree(corrections, rest ++ Enum.map(children, & &1.id), seen, found ++ children)
   end
 end
