@@ -5,12 +5,14 @@ defmodule Retain.Clock do
   so the DST and midnight edge cases live in one place.
   """
 
-  @db Tz.TimeZoneDatabase
+  @doc "The configured IANA database; see `Retain.Config.time_zone_database/0`."
+  @spec db() :: Calendar.time_zone_database()
+  def db, do: Retain.Config.time_zone_database()
 
   @doc "True if `tz` is a known IANA timezone name."
   @spec valid?(term()) :: boolean()
   def valid?(tz) when is_binary(tz) do
-    match?({:ok, _}, DateTime.shift_zone(~U[2020-01-01 00:00:00Z], tz, @db))
+    match?({:ok, _}, DateTime.shift_zone(~U[2020-01-01 00:00:00Z], tz, db()))
   end
 
   def valid?(_), do: false
@@ -18,7 +20,7 @@ defmodule Retain.Clock do
   @doc "The calendar date at `instant` in `tz`."
   @spec local_date(DateTime.t(), String.t()) :: Date.t()
   def local_date(%DateTime{} = instant, tz) do
-    instant |> DateTime.shift_zone!(tz, @db) |> DateTime.to_date()
+    instant |> DateTime.shift_zone!(tz, db()) |> DateTime.to_date()
   end
 
   @doc """
@@ -31,13 +33,13 @@ defmodule Retain.Clock do
   @spec start_of_day(Date.t(), String.t()) :: DateTime.t()
   def start_of_day(%Date{} = date, tz) do
     local =
-      case DateTime.new(date, ~T[00:00:00], tz, @db) do
+      case DateTime.new(date, ~T[00:00:00], tz, db()) do
         {:ok, dt} -> dt
         {:gap, _before, after_gap} -> after_gap
         {:ambiguous, first, _second} -> first
       end
 
-    DateTime.shift_zone!(local, "Etc/UTC", @db)
+    DateTime.shift_zone!(local, "Etc/UTC", db())
   end
 
   @doc "The UTC instant at which the day after `instant`'s local date begins in `tz`."

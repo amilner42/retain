@@ -1,12 +1,15 @@
 defmodule Retain.HistoryTest do
   use ExUnit.Case, async: true
 
-  alias Retain.{History, Ladder}
+  alias Retain.{Fold, History, Ladder}
 
   @ladder Ladder.new([0, 1, 3, 7, 21, 58, 145, 365])
   @tz "America/Vancouver"
   # 20:00 local on 2026-07-14
   @t0 ~U[2026-07-15 03:00:00Z]
+
+  # A review event carries a resolved log entry; see Retain.Log.
+  defp r(id, outcome, at), do: {:review, id, Fold.entry(outcome, at)}
 
   defp d(n), do: Date.add(~D[2026-07-14], n)
   defp t(n), do: DateTime.add(@t0, n, :day)
@@ -32,9 +35,9 @@ defmodule Retain.HistoryTest do
     events = [
       {:item, 1, nil, t(0)},
       {:item, 2, nil, t(0)},
-      {:review, 1, :pass, t(0)},
-      {:review, 1, :pass, t(1)},
-      {:review, 2, :fail, t(3)}
+      r(1, :pass, t(0)),
+      r(1, :pass, t(1)),
+      r(2, :fail, t(3))
     ]
 
     series = History.series(events, @ladder, @tz, d(0), d(4))
@@ -48,7 +51,7 @@ defmodule Retain.HistoryTest do
   end
 
   test "events before `from` are applied, events after `to` are not" do
-    events = [{:item, 1, nil, t(0)}, {:review, 1, :pass, t(0)}, {:review, 1, :pass, t(5)}]
+    events = [{:item, 1, nil, t(0)}, r(1, :pass, t(0)), r(1, :pass, t(5))]
 
     assert History.series(events, @ladder, @tz, d(2), d(2)) ==
              [%{date: d(2), group: nil, count: 1, explored: 1.0, acquired: 1 / 7}]
@@ -58,7 +61,7 @@ defmodule Retain.HistoryTest do
     events = [
       {:item, 1, "cube", t(0)},
       {:item, 2, "move", t(1)},
-      {:review, 2, :pass, t(1)}
+      r(2, :pass, t(1))
     ]
 
     series = History.series(events, @ladder, @tz, d(0), d(1))
@@ -71,16 +74,16 @@ defmodule Retain.HistoryTest do
   end
 
   test "reviews for unknown items are ignored, duplicate item events are idempotent" do
-    events = [{:item, 1, nil, t(0)}, {:item, 1, nil, t(0)}, {:review, 9, :pass, t(0)}]
+    events = [{:item, 1, nil, t(0)}, {:item, 1, nil, t(0)}, r(9, :pass, t(0))]
     assert [%{count: 1, explored: +0.0}] = History.series(events, @ladder, @tz, d(0), d(0))
   end
 
   test "event order in the input does not matter" do
     events = [
-      {:review, 1, :pass, t(2)},
-      {:review, 1, :fail, t(1)},
+      r(1, :pass, t(2)),
+      r(1, :fail, t(1)),
       {:item, 1, nil, t(0)},
-      {:review, 1, :pass, t(0)}
+      r(1, :pass, t(0))
     ]
 
     assert History.series(events, @ladder, @tz, d(0), d(2)) ==
@@ -92,7 +95,7 @@ defmodule Retain.HistoryTest do
 
   test "days are local: a review at 23:30 Vancouver counts for that local date" do
     # 2026-07-15 06:30Z is 23:30 PDT on 2026-07-14.
-    events = [{:item, 1, nil, @t0}, {:review, 1, :pass, ~U[2026-07-15 06:30:00Z]}]
+    events = [{:item, 1, nil, @t0}, r(1, :pass, ~U[2026-07-15 06:30:00Z])]
 
     assert [%{date: ~D[2026-07-14], explored: 1.0}] =
              History.series(events, @ladder, @tz, d(0), d(0))

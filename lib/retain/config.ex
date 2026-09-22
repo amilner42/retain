@@ -7,7 +7,9 @@ defmodule Retain.Config do
         # optional: interval in days for each ladder level, index = level
         intervals: [0, 1, 3, 7, 21, 58, 145, 365],
         # optional: how many new items a user is introduced to per day, unless set per user
-        new_per_day: 10
+        new_per_day: 10,
+        # optional: the IANA database behind every date Retain computes
+        time_zone_database: Tz.TimeZoneDatabase
 
   `repo` is required. Everything else has a default.
   """
@@ -56,6 +58,19 @@ defmodule Retain.Config do
         raise ArgumentError,
               "config :retain, :new_per_day must be a non-negative integer, got: #{inspect(other)}"
     end
+  end
+
+  @doc """
+  The `Calendar.TimeZoneDatabase` behind every date Retain computes.
+
+  Retain depends on `:tz` so it works with no setup, but a host that already carries a database
+  (`:tzdata`, say) can point Retain at that one instead and drop the duplicate:
+
+      config :retain, time_zone_database: Tzdata.TimeZoneDatabase
+  """
+  @spec time_zone_database() :: Calendar.time_zone_database()
+  def time_zone_database do
+    Application.get_env(:retain, :time_zone_database, Tz.TimeZoneDatabase)
   end
 
   @doc "The scope used when a call passes none. Scopes partition users; see `Retain`."

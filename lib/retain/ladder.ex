@@ -7,7 +7,11 @@ defmodule Retain.Ladder do
     * `:pass`    climbs one level
     * `:partial` holds
     * `:fail`    drops one level
+    * `:again`   drops to level 0 ("no idea"), due after the level-0 interval
     * `:known`   jumps to the top level ("I already know this")
+
+  `:fail` and `:again` are two answers to "how badly": `:fail` gives back one step of spacing,
+  `:again` gives back all of it. Both count as a lapse.
 
   The top level still resurfaces at its interval so it can be lost again.
 
@@ -20,6 +24,8 @@ defmodule Retain.Ladder do
       0
       iex> Retain.Ladder.step(ladder, 4, :partial)
       4
+      iex> Retain.Ladder.step(ladder, 6, :again)
+      0
       iex> Retain.Ladder.step(ladder, 1, :known)
       7
       iex> Retain.Ladder.interval_days(ladder, 3)
@@ -31,15 +37,19 @@ defmodule Retain.Ladder do
   @enforce_keys [:intervals]
   defstruct [:intervals]
 
-  @type outcome :: :pass | :partial | :fail | :known
+  @type outcome :: :pass | :partial | :fail | :again | :known
   @type level :: non_neg_integer()
   @type t :: %__MODULE__{intervals: tuple()}
 
-  @outcomes [:pass, :partial, :fail, :known]
+  @outcomes [:pass, :partial, :fail, :again, :known]
 
   @doc "All valid outcomes."
   @spec outcomes() :: [outcome(), ...]
   def outcomes, do: @outcomes
+
+  @doc "The outcomes that count as a lapse: the learner did not have it."
+  @spec lapse?(outcome()) :: boolean()
+  def lapse?(outcome), do: outcome in [:fail, :again]
 
   @doc "Builds a ladder from a list of day intervals; the list index is the level."
   @spec new([non_neg_integer(), ...]) :: t()
@@ -66,6 +76,7 @@ defmodule Retain.Ladder do
   def step(%__MODULE__{} = ladder, level, :pass), do: min(level + 1, max(ladder))
   def step(%__MODULE__{}, level, :partial), do: level
   def step(%__MODULE__{}, level, :fail), do: Kernel.max(level - 1, 0)
+  def step(%__MODULE__{}, _level, :again), do: 0
   def step(%__MODULE__{} = ladder, _level, :known), do: max(ladder)
 
   @doc "Days until an item at `level` is due again."
@@ -81,7 +92,7 @@ defmodule Retain.Ladder do
     DateTime.add(at, interval_days(ladder, level), :day)
   end
 
-  @doc "True for `:pass`, `:partial`, `:fail`."
+  @doc "True for any of `outcomes/0`."
   @spec outcome?(term()) :: boolean()
   def outcome?(term), do: term in @outcomes
 end

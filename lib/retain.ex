@@ -46,11 +46,14 @@ defmodule Retain do
       rotation, *suspended* while paused. `put_items/3` adds items as new by default, so a host
       can load a whole map up front; `queue/2` introduces them a few per day, or `start/3` does
       it explicitly. Reviewing a new item starts it.
-    * **Review** — one attempt, with an outcome of `:pass`, `:partial` or `:fail`, or `:known`
-      for "I already know this" (see `master/3`). Reviews are never updated or deleted; every
-      other number Retain reports is derived from them.
-    * **Ladder** — level 0..7 per item; `:pass` climbs, `:partial` holds, `:fail` drops. Each
-      level has an interval; see `Retain.Ladder`.
+    * **Review** — one attempt, with an outcome of `:pass`, `:partial`, `:fail`, `:again` (back
+      to the start) or `:known` for "I already know this" (see `master/3`).
+    * **Log** — the rows behind an item. Append-only: nothing is ever updated or deleted, and
+      every other number Retain reports is a fold over it. Two rows are not attempts — a
+      `defer/4`, which only moves the due date, and an `amend/5`, which corrects an earlier row
+      by superseding it. `Retain.Log` resolves both before the fold; `Retain.Fold` applies them.
+    * **Ladder** — level 0..7 per item; `:pass` climbs, `:partial` holds, `:fail` drops one,
+      `:again` drops to 0. Each level has an interval; see `Retain.Ladder`.
     * **User** — whoever your app says. `uid` is any string; `tz` is required because "today"
       and "due today" are calendar concepts; `new_per_day` is their budget of new items.
     * **Scope** — an optional partition of users (default `"default"`). One host serving several
@@ -65,7 +68,7 @@ defmodule Retain do
 
   import Ecto.Query
 
-  alias Retain.{Clock, Config, Fold, History, Item, Ladder, Review, User}
+  alias Retain.{Clock, Config, Fold, History, Item, Ladder, Log, Review, User}
 
   @type uid :: String.t()
   @type key :: String.t()
@@ -118,18 +121,75 @@ defmodule Retain do
   def put_user(uid, opts \\ []) when is_binary(uid) do
     scope = scope(opts)
 
-    attrs =
-      %{scope: scope, uid: uid}
-      |> put_if(:tz, opts[:tz])
-      |> put_if(:new_per_day, opts[:new_per_day])
+    if opts[:tz] do
+      # One statement, so two requests racing to create the same learner both end up with them
+      # rather than one of them getting a unique violation. Only the fields the caller actually
+      # gave are replaced, so `put_user(uid, tz: ...)` never resets `new_per_day`.
+      attrs = %{
+        scope: scope,
+        uid: uid,
+        tz: opts[:tz],
+        new_per_day: opts[:new_per_day] || Config.new_per_day()
+      }
 
+      replace = [:tz, :updated_at] ++ if(opts[:new_per_day], do: [:new_per_day], else: [])
+
+      %User{}
+      |> User.changeset(attrs)
+      |> repo().insert(
+        on_conflict: {:replace, replace},
+        conflict_target: [:scope, :uid],
+        returning: true
+      )
+    else
+      update_user(scope, uid, opts)
+    end
+  end
+
+  # Without a timezone there is nothing to create, so this is an update of a learner that must
+  # already exist. A missing one is reported the way creating them would have been.
+  defp update_user(scope, uid, opts) do
     case repo().get_by(User, scope: scope, uid: uid) do
       nil ->
-        attrs = Map.put_new(attrs, :new_per_day, Config.new_per_day())
-        %User{} |> User.changeset(attrs) |> repo().insert()
+        changeset =
+          User.changeset(%User{}, %{
+            scope: scope,
+            uid: uid,
+            new_per_day: opts[:new_per_day] || Config.new_per_day()
+          })
+
+        {:error, %{changeset | action: :insert}}
 
       user ->
-        user |> User.changeset(attrs) |> repo().update()
+        user |> User.changeset(put_if(%{}, :new_per_day, opts[:new_per_day])) |> repo().update()
+    end
+  end
+
+  @doc """
+  Deletes a learner and everything Retain holds about them: their items and the whole review log.
+
+  Irreversible, and the only way to remove a user. Returns what went with them.
+  """
+  @spec delete_user(uid(), keyword()) ::
+          {:ok, %{items: non_neg_integer(), reviews: non_neg_integer()}} | {:error, :not_found}
+  def delete_user(uid, opts \\ []) when is_binary(uid) do
+    with {:ok, user} <- fetch_user(uid, opts) do
+      repo().transaction(fn ->
+        items = from(i in Item, where: i.user_id == ^user.id)
+
+        counts = %{
+          items: repo().aggregate(items, :count),
+          reviews:
+            repo().aggregate(
+              from(r in Review, join: i in assoc(r, :item), where: i.user_id == ^user.id),
+              :count
+            )
+        }
+
+        # retain_items and retain_reviews cascade from the user.
+        repo().delete!(user)
+        counts
+      end)
     end
   end
 
@@ -167,7 +227,13 @@ defmodule Retain do
         into_by_key =
           repo().all(from i in Item, where: i.user_id == ^into.id) |> Map.new(&{&1.key, &1})
 
-        from_items = repo().all(from i in Item, where: i.user_id == ^from.id)
+        # Lock what we are about to move, in a fixed order, so a review landing on the old uid
+        # mid-merge either happens first (and is carried over) or waits for the new home; and so
+        # two merges into the same user cannot deadlock each other.
+        from_items =
+          repo().all(
+            from i in Item, where: i.user_id == ^from.id, order_by: i.id, lock: "FOR UPDATE"
+          )
 
         {moved, merged} =
           Enum.reduce(from_items, {0, 0}, fn item, {moved, merged} ->
@@ -221,7 +287,8 @@ defmodule Retain do
       #=> {:ok, %{inserted: 1, existing: 0}}
 
   Returns `{:error, {:invalid_item, index, changeset}}` for the first invalid item, in which
-  case nothing is written.
+  case nothing is written. Repeated keys *within one call* are collapsed to the first, and count
+  as neither `inserted` nor `existing`, so the two do not necessarily add up to what was passed.
   """
   @spec put_items(uid(), [map()], keyword()) ::
           {:ok, %{inserted: non_neg_integer(), existing: non_neg_integer()}}
@@ -278,25 +345,38 @@ defmodule Retain do
   @spec start(uid(), [key()] | non_neg_integer(), keyword()) ::
           {:ok, %{started: non_neg_integer()}} | {:error, :not_found}
   def start(uid, keys_or_count, opts \\ []) when is_binary(uid) do
+    unless is_list(keys_or_count) or (is_integer(keys_or_count) and keys_or_count >= 0) do
+      raise ArgumentError,
+            "start/3 takes a list of keys or a non-negative count, got: #{inspect(keys_or_count)}"
+    end
+
     with {:ok, user} <- fetch_user(uid, opts) do
       now = now(opts)
 
-      ids =
-        case keys_or_count do
-          keys when is_list(keys) ->
-            new_items_query(user, opts) |> where([i], i.key in ^keys) |> select([i], i.id)
+      repo().transaction(fn ->
+        # Lock the rows we picked, then re-check that they are still new in the update itself.
+        # Both halves matter: the lock makes a concurrent `review/4` of the same item wait (it
+        # takes the same lock), and the condition means that if the review got there first we
+        # start nothing rather than overwriting the ladder state it just wrote.
+        ids =
+          case keys_or_count do
+            keys when is_list(keys) -> new_items_query(user, opts) |> where([i], i.key in ^keys)
+            count -> new_items_query(user, opts) |> limit(^count)
+          end
+          |> select([i], i.id)
+          |> lock("FOR UPDATE")
+          |> repo().all()
 
-          count when is_integer(count) and count >= 0 ->
-            new_items_query(user, opts) |> limit(^count) |> select([i], i.id)
-        end
-        |> repo().all()
+        {started, _} =
+          repo().update_all(
+            from(i in Item,
+              where: i.id in ^ids and is_nil(i.started_at) and not i.suspended
+            ),
+            set: [started_at: now, due: now, updated_at: now]
+          )
 
-      {started, _} =
-        repo().update_all(from(i in Item, where: i.id in ^ids),
-          set: [started_at: now, due: now, updated_at: now]
-        )
-
-      {:ok, %{started: started}}
+        %{started: started}
+      end)
     end
   end
 
@@ -317,7 +397,7 @@ defmodule Retain do
 
       repo().transaction(fn ->
         Enum.reduce(List.wrap(keys), %{mastered: 0}, fn key, acc ->
-          case do_review(user, key, :known, at, %{}) do
+          case do_entry(user, key, :known, at, %{}, nil) do
             {:ok, _} -> %{acc | mastered: acc.mastered + 1}
             {:error, reason} when reason in [:not_found, :suspended] -> acc
             {:error, reason} -> repo().rollback(reason)
@@ -353,63 +433,180 @@ defmodule Retain do
   Records an attempt and moves the item on the ladder. This is the only write that changes
   ladder state, and it is the only way to. Reviewing a new item starts it.
 
-  `outcome` is `:pass`, `:partial`, `:fail`, or `:known` to jump to the top level. Options:
+  `outcome` is `:pass`, `:partial`, `:fail`, `:again` (back to level 0) or `:known` (jump to the
+  top level). Options:
 
     * `at:` — when it happened; defaults to now. Must not be earlier than the item's creation,
-      start or previous review, so the log stays in order (`{:error, :out_of_order}`).
+      start or newest log entry, so the log stays in order (`{:error, :out_of_order}`).
     * `meta:` — any map to keep with the review (what was answered, timing). Retain stores it
       and never reads it.
 
       Retain.review("u1", "pos:abc", :fail, meta: %{picked: "pass", loss: 0.59})
       #=> {:ok, %{level_before: 2, level_after: 1, due: ~U[...], review_id: 42}}
+
+  Retain does not police *when* you review. It does not check that the item was due, and it
+  cannot tell a first answer from a retry of the same one — every call is another row in the
+  log. A host that grades only the first attempt at a due item must decide that itself and call
+  `review/4` once it has.
   """
   @spec review(uid(), key(), outcome(), keyword()) ::
           {:ok, review_result()}
           | {:error, :not_found | :suspended | :invalid_outcome | :out_of_order}
   def review(uid, key, outcome, opts \\ []) when is_binary(uid) and is_binary(key) do
     at = usec(Keyword.get(opts, :at) || now(opts))
-    meta = Keyword.get(opts, :meta, %{})
-    unless is_map(meta), do: raise(ArgumentError, "meta: must be a map, got: #{inspect(meta)}")
+    meta = meta!(opts)
 
     with :ok <- if(Ladder.outcome?(outcome), do: :ok, else: {:error, :invalid_outcome}),
          {:ok, user} <- fetch_user(uid, opts) do
-      repo().transaction(fn ->
-        case do_review(user, key, outcome, at, meta) do
-          {:ok, result} -> result
-          {:error, reason} -> repo().rollback(reason)
+      in_transaction(fn -> do_entry(user, key, outcome, at, meta, nil) end)
+    end
+  end
+
+  @doc """
+  Moves an item's due date without touching the ladder: burying, snoozing, "not today".
+
+  The item keeps its level, its counters and its last-reviewed time; only `due` becomes `until`.
+  A defer is a row in the log like any other, so `rebuild/2` and `history/2` reproduce it — but
+  it is not an attempt, so it does not count towards `streak/2`, `reps` or `explored`.
+
+      Retain.defer("u1", "pos:abc", DateTime.add(DateTime.utc_now(), 3, :day))
+      #=> {:ok, %{level_before: 2, level_after: 2, due: ~U[...], review_id: 43}}
+  """
+  @spec defer(uid(), key(), DateTime.t(), keyword()) ::
+          {:ok, review_result()} | {:error, :not_found | :suspended | :out_of_order}
+  def defer(uid, key, %DateTime{} = until, opts \\ []) when is_binary(uid) and is_binary(key) do
+    at = usec(Keyword.get(opts, :at) || now(opts))
+    meta = meta!(opts)
+
+    with {:ok, user} <- fetch_user(uid, opts) do
+      in_transaction(fn -> do_entry(user, key, :defer, at, meta, usec(until)) end)
+    end
+  end
+
+  @doc """
+  Corrects an earlier review, by appending rather than editing.
+
+  `review_id` names a row of this item's log; `outcome` is what it should have said. The row
+  stays; a new one is written that supersedes it, and every fold — `rebuild/2`, `history/2`, the
+  item's live state — then reads the corrected outcome *in the original's place in time*. So
+  amending yesterday's `:fail` to `:pass` leaves exactly the state a log that had said `:pass`
+  yesterday would have produced. The item is re-derived from the whole log on the spot.
+
+  This is the Anki-style override: the host grades an answer, shows it, and the learner says it
+  was really a pass. Amend an amendment and the newest wins; a `:defer` cannot be amended.
+
+      Retain.amend("u1", "pos:abc", 42, :pass)
+      #=> {:ok, %{level_before: 1, level_after: 3, due: ~U[...], review_id: 44}}
+  """
+  @spec amend(uid(), key(), integer(), outcome(), keyword()) ::
+          {:ok, review_result()}
+          | {:error, :not_found | :suspended | :invalid_outcome | :not_amendable}
+  def amend(uid, key, review_id, outcome, opts \\ [])
+      when is_binary(uid) and is_binary(key) and is_integer(review_id) do
+    at = usec(Keyword.get(opts, :at) || now(opts))
+    meta = meta!(opts)
+
+    with :ok <- if(Ladder.outcome?(outcome), do: :ok, else: {:error, :invalid_outcome}),
+         {:ok, user} <- fetch_user(uid, opts) do
+      in_transaction(fn ->
+        with {:ok, item} <- lock_item(user, key),
+             :ok <- if(item.suspended, do: {:error, :suspended}, else: :ok),
+             {:ok, superseded} <- amendable(item, review_id) do
+          row =
+            repo().insert!(%Review{
+              item_id: item.id,
+              outcome: outcome,
+              at: at,
+              meta: meta,
+              supersedes_id: superseded.id
+            })
+
+          # The correction lands in the past, so the tail of the fold changes: re-derive.
+          next = rederive_item!(item.id, ladder())
+
+          {:ok,
+           %{
+             level_before: item.level,
+             level_after: next.level,
+             due: next.due,
+             review_id: row.id
+           }}
         end
       end)
     end
   end
 
-  # The body of review/4, to run inside a transaction. Writes nothing unless it succeeds, so a
-  # caller batching several (master/3) can skip failures without poisoning its transaction.
-  defp do_review(user, key, outcome, at, meta) do
-    item =
-      repo().one(
-        from i in Item, where: i.user_id == ^user.id and i.key == ^key, lock: "FOR UPDATE"
-      )
+  # Runs `fun` in a transaction, turning its {:error, reason} into a rollback.
+  defp in_transaction(fun) do
+    repo().transaction(fn ->
+      case fun.() do
+        {:ok, result} -> result
+        {:error, reason} -> repo().rollback(reason)
+      end
+    end)
+  end
+
+  defp meta!(opts) do
+    meta = Keyword.get(opts, :meta, %{})
+    unless is_map(meta), do: raise(ArgumentError, "meta: must be a map, got: #{inspect(meta)}")
+    meta
+  end
+
+  defp lock_item(user, key) do
+    case repo().one(
+           from i in Item, where: i.user_id == ^user.id and i.key == ^key, lock: "FOR UPDATE"
+         ) do
+      nil -> {:error, :not_found}
+      item -> {:ok, item}
+    end
+  end
+
+  defp amendable(item, review_id) do
+    row = repo().one(from r in Review, where: r.id == ^review_id and r.item_id == ^item.id)
 
     cond do
-      is_nil(item) ->
-        {:error, :not_found}
+      is_nil(row) -> {:error, :not_found}
+      row.outcome == :defer -> {:error, :not_amendable}
+      true -> {:ok, row}
+    end
+  end
 
-      item.suspended ->
-        {:error, :suspended}
+  # The body of review/4 and defer/4, to run inside a transaction. Writes nothing unless it
+  # succeeds, so a caller batching several (master/3) can skip failures without poisoning its
+  # transaction.
+  defp do_entry(user, key, outcome, at, meta, until) do
+    with {:ok, item} <- lock_item(user, key) do
+      cond do
+        item.suspended ->
+          {:error, :suspended}
 
-      not in_order?(item, at) ->
-        {:error, :out_of_order}
+        not in_order?(item, at) ->
+          {:error, :out_of_order}
 
-      true ->
-        state = Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at])
-        next = Fold.apply(state, ladder(), outcome, at)
-        changes = if item.started_at, do: next, else: Map.put(next, :started_at, at)
+        true ->
+          state = Map.take(item, [:level, :due, :reps, :lapses, :last_reviewed_at])
+          next = Fold.apply(state, ladder(), Fold.entry(outcome, at, until))
 
-        repo().update!(Ecto.Changeset.change(item, changes))
-        review = repo().insert!(%Review{item_id: item.id, outcome: outcome, at: at, meta: meta})
+          # An attempt on a new item starts it; deferring one only moves its due date.
+          changes =
+            if item.started_at || outcome == :defer,
+              do: next,
+              else: Map.put(next, :started_at, at)
 
-        {:ok,
-         %{level_before: item.level, level_after: next.level, due: next.due, review_id: review.id}}
+          repo().update!(Ecto.Changeset.change(item, changes))
+
+          row =
+            repo().insert!(%Review{
+              item_id: item.id,
+              outcome: outcome,
+              at: at,
+              until: until,
+              meta: meta
+            })
+
+          {:ok,
+           %{level_before: item.level, level_after: next.level, due: next.due, review_id: row.id}}
+      end
     end
   end
 
@@ -559,10 +756,12 @@ defmodule Retain do
           | {:error, :not_found}
   def streak(uid, opts \\ []) when is_binary(uid) do
     with {:ok, user} <- fetch_user(uid, opts) do
+      # Attempts only: a defer is not practice, and an amendment is a correction of a day already
+      # counted, not a new one.
       dates =
         from(r in Review,
           join: i in assoc(r, :item),
-          where: i.user_id == ^user.id,
+          where: i.user_id == ^user.id and is_nil(r.supersedes_id) and r.outcome != ^:defer,
           distinct: true,
           select: fragment("((? AT TIME ZONE 'UTC') AT TIME ZONE ?)::date", r.at, ^user.tz)
         )
@@ -609,14 +808,27 @@ defmodule Retain do
         |> repo().all()
         |> Enum.map(fn {id, tags, at} -> {:item, id, if(group_key, do: tags[group_key]), at} end)
 
+      # Amendments are resolved per item before the events are built, so history reads the
+      # corrected outcome on the day the original was answered — which is what makes
+      # "history at the last day == live state" hold after an amend.
       review_events =
         from(r in Review,
           join: i in subquery(item_query),
           on: i.id == r.item_id,
-          select: {r.item_id, r.outcome, r.at}
+          select: %{
+            item_id: r.item_id,
+            id: r.id,
+            outcome: r.outcome,
+            at: r.at,
+            until: r.until,
+            supersedes_id: r.supersedes_id
+          }
         )
         |> repo().all()
-        |> Enum.map(fn {id, outcome, at} -> {:review, id, outcome, at} end)
+        |> Enum.group_by(& &1.item_id)
+        |> Enum.flat_map(fn {id, rows} ->
+          Enum.map(Log.entries(rows), &{:review, id, &1})
+        end)
 
       {:ok, History.series(item_events ++ review_events, ladder(), user.tz, from, to)}
     end
@@ -656,8 +868,7 @@ defmodule Retain do
 
   # Columns are UTC at microsecond precision; accept any zone and precision from callers.
   defp usec(%DateTime{} = dt) do
-    %DateTime{microsecond: {us, _}} =
-      dt = DateTime.shift_zone!(dt, "Etc/UTC", Tz.TimeZoneDatabase)
+    %DateTime{microsecond: {us, _}} = dt = DateTime.shift_zone!(dt, "Etc/UTC", Clock.db())
 
     %{dt | microsecond: {us, 6}}
   end
@@ -727,23 +938,37 @@ defmodule Retain do
     |> order_by([i], asc_nulls_last: i.position, asc: i.inserted_at, asc: i.id)
   end
 
+  # The learner's day as a half-open range of instants rather than a per-row timezone
+  # conversion: same answer (`Clock.start_of_day/2` is monotone across DST gaps and folds), but
+  # it is a range scan on [user_id, started_at] instead of a sequential scan of every item the
+  # learner has, which is what `queue/2` used to pay on every call.
   defp started_today_count(user, now) do
     today = Clock.local_date(now, user.tz)
+    from_at = Clock.start_of_day(today, user.tz)
+    until_at = Clock.start_of_day(Date.add(today, 1), user.tz)
 
     Item
-    |> where([i], i.user_id == ^user.id and not is_nil(i.started_at))
-    |> where(
-      [i],
-      fragment("((? AT TIME ZONE 'UTC') AT TIME ZONE ?)::date", i.started_at, ^user.tz) == ^today
-    )
+    |> where([i], i.user_id == ^user.id)
+    |> where([i], i.started_at >= ^from_at and i.started_at < ^until_at)
     |> repo().aggregate(:count)
   end
 
+  # An entry may not land before the item existed, before it started, or before the newest entry
+  # already in its log. `last_reviewed_at` is not enough for the last of those: a defer does not
+  # move it, and an amendment is not an entry at all, so ask the log itself.
   defp in_order?(item, at) do
     not_before = fn earlier -> is_nil(earlier) or DateTime.compare(at, earlier) != :lt end
 
     not_before.(item.inserted_at) and not_before.(item.started_at) and
-      not_before.(item.last_reviewed_at)
+      not_before.(newest_entry_at(item.id))
+  end
+
+  defp newest_entry_at(item_id) do
+    repo().one(
+      from r in Review,
+        where: r.item_id == ^item_id and is_nil(r.supersedes_id),
+        select: max(r.at)
+    )
   end
 
   defp filter_tags(query, nil), do: query
@@ -754,21 +979,30 @@ defmodule Retain do
     where(query, [i], fragment("? @> ?", i.tags, type(^tags, :map)))
   end
 
-  # Re-derives one item from its reviews. Locks the row so a concurrent review cannot interleave.
+  # Re-derives one item from its log. Locks the row so a concurrent review cannot interleave.
+  # Returns the state it wrote.
   defp rederive_item!(item_id, ladder) do
     item = repo().one!(from i in Item, where: i.id == ^item_id, lock: "FOR UPDATE")
 
-    reviews =
-      repo().all(
-        from r in Review,
-          where: r.item_id == ^item_id,
-          order_by: [asc: r.at, asc: r.id],
-          select: {r.outcome, r.at}
-      )
-
     # A never-started item has no reviews; a started one is due from its start.
     origin = item.started_at || item.inserted_at
-    repo().update!(Ecto.Changeset.change(item, Fold.replay(origin, ladder, reviews)))
+    state = Fold.replay(origin, ladder, Log.entries(log_rows(item_id)))
+    repo().update!(Ecto.Changeset.change(item, state))
+    state
+  end
+
+  defp log_rows(item_id) do
+    repo().all(
+      from r in Review,
+        where: r.item_id == ^item_id,
+        select: %{
+          id: r.id,
+          outcome: r.outcome,
+          at: r.at,
+          until: r.until,
+          supersedes_id: r.supersedes_id
+        }
+    )
   end
 
   # dates: distinct local dates, descending.

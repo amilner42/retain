@@ -6,10 +6,15 @@ defmodule Retain.History do
 
   alias Retain.{Clock, Fold, Ladder}
 
-  @typedoc "An item creation or a review, as loaded from the DB."
+  @typedoc """
+  An item creation, or one log entry for it.
+
+  The entries are `Retain.Log`'s, not raw rows: amendments are already resolved, so an entry sits
+  on the day the answer it corrects was given.
+  """
   @type event ::
           {:item, item_id :: term(), group :: String.t() | nil, created_at :: DateTime.t()}
-          | {:review, item_id :: term(), Ladder.outcome(), at :: DateTime.t()}
+          | {:review, item_id :: term(), Fold.entry()}
 
   @typedoc """
   One reading: how many items existed in the group that day, what share had been reviewed at
@@ -88,10 +93,10 @@ defmodule Retain.History do
     end
   end
 
-  defp apply_event({:review, id, outcome, at}, items, groups, ladder) do
+  defp apply_event({:review, id, entry}, items, groups, ladder) do
     case Map.fetch(items, id) do
       {:ok, {group, before}} ->
-        after_ = Fold.apply(before, ladder, outcome, at)
+        after_ = Fold.apply(before, ladder, entry)
         items = Map.put(items, id, {group, after_})
 
         groups =
@@ -128,11 +133,11 @@ defmodule Retain.History do
   end
 
   defp event_at({:item, _, _, at}), do: at
-  defp event_at({:review, _, _, at}), do: at
+  defp event_at({:review, _, entry}), do: entry.at
 
   # An item must exist before it is reviewed at the same instant.
   defp event_rank({:item, _, _, _}), do: 0
-  defp event_rank({:review, _, _, _}), do: 1
+  defp event_rank({:review, _, _}), do: 1
 
   defp sort_key_lte({d1, t1, r1}, {d2, t2, r2}) do
     case Date.compare(d1, d2) do
