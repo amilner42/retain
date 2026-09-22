@@ -143,4 +143,39 @@ defmodule Retain.QueueTest do
       assert {:error, :not_found} = Retain.queue("nobody")
     end
   end
+
+  describe "due/2 offset" do
+    test "walks further down the same ordering without repeating or skipping" do
+      user!()
+      items!("u1", Enum.map(1..12, &%{key: "k#{&1}"}))
+
+      # Give every item a distinct place in the (level, due, id) ordering.
+      for n <- 1..12, do: review!("u1", "k#{n}", :pass, at: DateTime.add(t0(), n, :second))
+
+      {:ok, all} = Retain.due("u1", limit: 12, before: days(400))
+      assert length(all) == 12
+
+      {:ok, first} = Retain.due("u1", limit: 5, before: days(400))
+      {:ok, second} = Retain.due("u1", limit: 5, offset: 5, before: days(400))
+      {:ok, third} = Retain.due("u1", limit: 5, offset: 10, before: days(400))
+
+      assert keys(first ++ second ++ third) == keys(all)
+      assert length(third) == 2
+
+      # Past the end is empty, not an error.
+      assert {:ok, []} = Retain.due("u1", limit: 5, offset: 99, before: days(400))
+    end
+
+    test "queue/2 passes it through to the reviews" do
+      user!()
+      items!("u1", Enum.map(1..6, &%{key: "k#{&1}"}))
+      for n <- 1..6, do: review!("u1", "k#{n}", :pass, at: DateTime.add(t0(), n, :second))
+
+      {:ok, %{reviews: page}} = Retain.queue("u1", limit: 2, offset: 4, before: days(400))
+      assert length(page) == 2
+
+      {:ok, %{reviews: everything}} = Retain.queue("u1", limit: 6, before: days(400))
+      assert keys(page) == keys(Enum.drop(everything, 4))
+    end
+  end
 end

@@ -619,8 +619,9 @@ defmodule Retain do
   the user's `new_per_day` minus however many were started today already (by any path), and at
   most `new_limit:` if given. `new_remaining_today` is that budget before this call.
 
-  Options: `tags:`, `before:`, `limit:` (reviews) and `now:` as in `due/2`; `new_limit:`; and
-  `new: :after_reviews` to hold new items back until nothing is due (default `:always`).
+  Options: `tags:`, `before:`, `limit:`, `offset:` (reviews) and `now:` as in `due/2`;
+  `new_limit:`; and `new: :after_reviews` to hold new items back until nothing is due
+  (default `:always`).
 
       Retain.queue("u1", tags: %{tense: "present"}, limit: 20)
       #=> {:ok, %{reviews: [...], new: [...], new_remaining_today: 7}}
@@ -658,15 +659,19 @@ defmodule Retain do
   of tomorrow in the user's timezone, i.e. everything due today), ordered by level ascending
   then due ascending, at most `limit:` (default #{@default_limit}).
 
-  `tags:` restricts to items whose tags contain every given pair.
+  `tags:` restricts to items whose tags contain every given pair. `offset:` skips that many,
+  for a "keep going" that walks further down the same ordering; the order is total (level, due,
+  id), so paging it cannot repeat or skip an item as long as nothing is reviewed in between.
 
       Retain.due("u1", tags: %{kind: "cube"}, limit: 5)
+      Retain.due("u1", limit: 20, offset: 20)
   """
   @spec due(uid(), keyword()) :: {:ok, [Item.t()]} | {:error, :not_found}
   def due(uid, opts \\ []) when is_binary(uid) do
     with {:ok, user} <- fetch_user(uid, opts) do
       before = usec(Keyword.get(opts, :before) || Clock.start_of_tomorrow(now(opts), user.tz))
       limit = Keyword.get(opts, :limit, @default_limit)
+      skip = Keyword.get(opts, :offset, 0)
 
       items =
         Item
@@ -675,6 +680,7 @@ defmodule Retain do
         |> filter_tags(opts[:tags])
         |> order_by([i], asc: i.level, asc: i.due, asc: i.id)
         |> limit(^limit)
+        |> offset(^skip)
         |> repo().all()
 
       {:ok, items}
