@@ -2,10 +2,10 @@ defmodule Retain.MigrationTest do
   use Retain.DataCase, async: true
 
   test "the installed version is recorded on the users table" do
-    assert %{rows: [["1"]]} =
+    assert %{rows: [["2"]]} =
              Repo.query!("SELECT obj_description('retain_users'::regclass, 'pg_class')")
 
-    assert Retain.Migration.latest_version() == 1
+    assert Retain.Migration.latest_version() == 2
   end
 
   test "the tables exist with their indexes" do
@@ -18,6 +18,13 @@ defmodule Retain.MigrationTest do
     assert "retain_items_tags_index" in names
     assert "retain_reviews_item_id_at_index" in names
     assert "retain_items_user_id_started_at_index" in names
+
+    # v02: the two indexes that match due/2's and queue/2's ORDER BY column for column, and the
+    # one that keeps a cascading delete off a sequential scan of the amendment chain.
+    assert "retain_items_due_index" in names
+    assert "retain_items_new_index" in names
+    assert "retain_reviews_supersedes_id_index" in names
+    refute "retain_items_user_id_suspended_due_level_index" in names
   end
 
   test "deleting a user cascades to items and reviews" do

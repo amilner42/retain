@@ -46,8 +46,14 @@ Retain.put_items("u1", [%{key: "pos:8f2a/cube", tags: %{kind: "cube"}, content: 
   Retain.queue("u1", tags: %{tense: "present"}, limit: 20)
 
 # How it went. You grade; Retain schedules. Reviewing a new item starts it.
-{:ok, %{level_before: 0, level_after: 1, due: due}} =
+{:ok, %{level_before: 0, level_after: 1, due: due, review_id: id}} =
   Retain.review("u1", hd(new).key, :pass, meta: %{typed: "vais", ms: 4200})
+
+# "That was really a pass." The log stays append-only; the correction supersedes the row.
+Retain.amend("u1", hd(new).key, id, :pass)
+
+# "Not today." Moves the due date, keeps the level. Only for items already in rotation.
+Retain.defer("u1", "aller/present/tu", DateTime.add(DateTime.utc_now(), 3, :day))
 
 # Or start things explicitly: the next five, or specific keys.
 Retain.start("u1", 5, tags: %{tense: "present"})
@@ -70,6 +76,9 @@ Retain.history("u1", group_by: :tense, from: ~D[2026-08-01], to: ~D[2026-08-31])
 
 # If one person ends up with two ids.
 Retain.merge_users("old-uid", "u1")
+
+# Everything Retain holds about them, gone.
+Retain.delete_user("u1")
 ```
 
 Every function returns `{:ok, _}` or `{:error, reason}`. Unknown users and items are
@@ -78,7 +87,7 @@ Every function returns `{:ok, _}` or `{:error, reason}`. Unknown users and items
 ## How it works
 
 **The ladder.** Every item has a level from 0 to 7. `:pass` climbs one, `:partial` holds,
-`:fail` drops one, `:known` jumps to the top. Each level has an interval — `0, 1, 3, 7, 21, 58, 145, 365` days by default — and
+`:fail` drops one, `:again` drops to 0 wherever it was, `:known` jumps to the top. Each level has an interval — `0, 1, 3, 7, 21, 58, 145, 365` days by default — and
 an item is due that many days after its last review. New items are level 0 and due immediately.
 Level 7 still comes back every year so it can be lost again. The curve is the one FSRS's
 default weights produce for a card that is always answered "good", with Anki's one-day first
@@ -101,6 +110,23 @@ new material back until the reviews are done.
 never updated or deleted. `mix retain.rebuild` replays the whole log and overwrites the derived
 fields; the result is always identical to what live reviews produced, and a property test says
 so. `history/2` runs the same fold day by day. Change the intervals, run rebuild, done.
+
+**Corrections append too.** `amend/5` does not edit the row it corrects; it writes a new one that
+supersedes it, and `Retain.Log` resolves them before the fold ever sees them — so the correction
+takes effect *where the original was in time*, and a rebuild of an amended log equals a rebuild
+of a log that had said the right thing all along. A property test says that too. A host re-amends
+whatever `review_id` it was last handed, so the corrections of one answer are a tree rather than
+a line; the newest leaf anywhere in it wins.
+
+`defer/4` is a log row as well, so burying an item survives a rebuild; it is not an attempt, so
+it moves no counter and no streak. It needs an item already in rotation — a new one is
+`{:error, :not_started}`. That is not fussiness: a defer does not start anything, so `start/3`
+would write `due` back over it a moment later with no log row to show for it, and the rebuild
+would then disagree with what you could see. The log stays the truth by not letting that happen.
+
+**Retain does not police when you review.** It does not check that an item was due and it cannot
+tell a first answer from a retry — every call is another row. If only the first answer at a due
+item should count, your app decides that and calls `review/4` once it has.
 
 **Days are the learner's days.** "Due today", streaks and history buckets all go through the
 user's IANA timezone. DST gaps and folds are handled in one place (`Retain.Clock`) and tested at
@@ -146,6 +172,16 @@ mix test          # needs a local Postgres; see config/test.exs for credentials
 mix dialyzer
 mix docs
 ```
+
+`test/retain/concurrency_test.exs` interleaves `start`, `review`, `suspend`, `master`,
+`merge_users` and `put_user` on **real connections**. That is worth spelling out, because this
+file used to only look like it did: `Sandbox.unboxed_run/2` plus `Task` inherits `$callers`, so
+eight "concurrent" tasks shared one `pg_backend_pid` and no `FOR UPDATE` in the library was ever
+contended. It runs in `:auto` mode now and measures the number of backends it got, so it cannot
+quietly go back to running single-file.
+
+`test/retain/scale_test.exs` asserts the query *plans* for a 5,000-item deck rather than a
+wall-clock bound, so a lost index is a failure rather than a slow day.
 
 ## License
 

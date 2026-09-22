@@ -31,16 +31,34 @@ defmodule Retain.LadderTest do
     assert Ladder.outcome?(:partial)
     assert Ladder.outcome?(:fail)
     assert Ladder.outcome?(:known)
+    assert Ladder.outcome?(:again)
+    # :defer is a log entry, not an answer.
+    refute Ladder.outcome?(:defer)
     refute Ladder.outcome?(:correct)
     refute Ladder.outcome?("pass")
   end
 
-  property "step always lands on a real level, and moves at most one except for :known" do
+  property "step always lands on a real level; only :known and :again jump" do
     check all level <- integer(0..7), outcome <- member_of(Ladder.outcomes()) do
       next = Ladder.step(@ladder, level, outcome)
       assert next in 0..7
-      if outcome == :known, do: assert(next == 7), else: assert(abs(next - level) <= 1)
+
+      case outcome do
+        :known -> assert next == 7
+        :again -> assert next == 0
+        _ -> assert abs(next - level) <= 1
+      end
     end
+  end
+
+  test ":again resets to level 0 from anywhere, and counts as a lapse" do
+    for level <- 0..7, do: assert(Ladder.step(@ladder, level, :again) == 0)
+    assert Ladder.outcome?(:again)
+    assert Ladder.lapse?(:again)
+    assert Ladder.lapse?(:fail)
+    refute Ladder.lapse?(:partial)
+    refute Ladder.lapse?(:pass)
+    refute Ladder.lapse?(:known)
   end
 
   property "pass never lowers, fail never raises, partial never moves" do

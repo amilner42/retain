@@ -8,7 +8,19 @@ defmodule Mix.Tasks.Retain.Gen.Migration do
       $ mix retain.gen.migration -r MyApp.OtherRepo
 
   The generated file delegates to `Retain.Migration`, so re-running this after upgrading Retain
-  produces a migration that applies only what is new.
+  produces a migration that applies only what is new -- and rolls back to exactly where the host
+  was before it, which for a first install is nothing at all:
+
+      # first install
+      def up, do: Retain.Migration.up(version: 2)
+      def down, do: Retain.Migration.down(version: 0)
+
+      # later, upgrading a host that already has v02
+      def up, do: Retain.Migration.up(version: 3)
+      def down, do: Retain.Migration.down(version: 2)
+
+  "Where the host was before" is read from the migrations already in the repo's path, so no
+  database connection is needed to generate one.
   """
   use Mix.Task
 
@@ -24,6 +36,7 @@ defmodule Mix.Tasks.Retain.Gen.Migration do
 
     path = Ecto.Migrator.migrations_path(repo)
     version = Retain.Migration.latest_version()
+    previous = installed_here(path)
     name = "add_retain_v#{String.pad_leading(Integer.to_string(version), 2, "0")}"
     file = Path.join(path, "#{timestamp()}_#{name}.exs")
 
@@ -34,9 +47,25 @@ defmodule Mix.Tasks.Retain.Gen.Migration do
       use Ecto.Migration
 
       def up, do: Retain.Migration.up(version: #{version})
-      def down, do: Retain.Migration.down(version: #{version - 1})
+      def down, do: Retain.Migration.down(version: #{previous})
     end
     """)
+  end
+
+  # The newest Retain version this host has already generated a migration for, or 0 if none.
+  # Rolling back must undo what this migration did and no more: on a first install that is
+  # every table, and assuming otherwise left v01 behind with nothing to remove it.
+  defp installed_here(path) do
+    path
+    |> Path.join("*_add_retain_v*.exs")
+    |> Path.wildcard()
+    |> Enum.map(fn file ->
+      case Regex.run(~r/_add_retain_v(\d+)\.exs$/, Path.basename(file)) do
+        [_, version] -> String.to_integer(version)
+        _ -> 0
+      end
+    end)
+    |> Enum.max(fn -> 0 end)
   end
 
   defp timestamp do

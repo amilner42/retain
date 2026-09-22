@@ -68,16 +68,39 @@ defmodule Retain.FoldTest do
   end
 
   test "replay is the same as applying one by one" do
-    reviews = [
-      {:pass, @t0},
-      {:pass, DateTime.add(@t0, 1, :day)},
-      {:fail, DateTime.add(@t0, 5, :day)}
+    entries = [
+      Fold.entry(:pass, @t0),
+      Fold.entry(:pass, DateTime.add(@t0, 1, :day)),
+      Fold.entry(:fail, DateTime.add(@t0, 5, :day))
     ]
 
     expected =
-      Enum.reduce(reviews, Fold.initial(@t0), fn {o, at}, s -> Fold.apply(s, @ladder, o, at) end)
+      Enum.reduce(entries, Fold.initial(@t0), fn e, s -> Fold.apply(s, @ladder, e) end)
 
-    assert Fold.replay(@t0, @ladder, reviews) == expected
+    assert Fold.replay(@t0, @ladder, entries) == expected
     assert Fold.replay(@t0, @ladder, []) == Fold.initial(@t0)
+  end
+
+  test ":again drops to level 0 and is due after the level-0 interval; it is a lapse" do
+    s = Fold.replay(@t0, @ladder, Enum.map(0..4, &Fold.entry(:pass, DateTime.add(@t0, &1, :day))))
+    assert s.level == 5
+
+    t = DateTime.add(@t0, 9, :day)
+    again = Fold.apply(s, @ladder, :again, t)
+
+    assert again.level == 0
+    assert again.due == DateTime.add(t, 0, :day)
+    assert again.reps == s.reps + 1
+    assert again.lapses == s.lapses + 1
+    assert again.last_reviewed_at == t
+  end
+
+  test "a defer moves due and touches nothing else" do
+    s = Fold.apply(Fold.initial(@t0), @ladder, :pass, @t0)
+    until = DateTime.add(@t0, 30, :day)
+
+    deferred = Fold.apply(s, @ladder, Fold.entry(:defer, DateTime.add(@t0, 1, :hour), until))
+
+    assert deferred == %{s | due: until}
   end
 end

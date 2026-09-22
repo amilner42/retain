@@ -18,7 +18,7 @@ defmodule Retain.Migration do
   """
   use Ecto.Migration
 
-  @versions [Retain.Migrations.V01]
+  @versions [Retain.Migrations.V01, Retain.Migrations.V02]
 
   @doc "Migrates from the installed version up to `version:` (default: latest)."
   @spec up(keyword()) :: :ok
